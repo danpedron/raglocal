@@ -1,0 +1,44 @@
+# Produção e segredos
+config/.env
+config/.env.*
+!config/.env.example
+*.pem
+*.key
+*.crt
+*.csr
+id_*
+
+# Dados do condomínio e armazenamento local
+storage/*
+!storage/.nginx-deny
+documents/
+uploads/
+backups/
+*.pdf
+*.doc
+*.docx
+*.odt
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Banco, logs e testes locais
+*.sql.gz
+*.dump
+*.log
+*.sqlite
+*.sqlite3
+runtime/
+var/
+
+# Relatórios com dados de implantação
+*_deployment_report.md
+*_runtime_tests.md
+*_ollama_research.md
+README_OPERACAO.md
+
+# Sistema e editores
+.DS_Store
+.vscode/
+.idea/

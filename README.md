@@ -1,0 +1,41 @@
+# Jaraguá Tower IA
+
+Aplicação PHP de RAG para responder dúvidas sobre estatuto, atas e respostas validadas de um condomínio. O sistema usa MariaDB para indexação textual e integra-se a um servidor Ollama configurado externamente.
+
+## Princípios de segurança
+
+A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência.
+
+Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas são registradas na tabela `audit_logs`, junto com o IP de origem, porta de origem quando fornecida pelo proxy, User-Agent, método, URI, host, referenciador, cabeçalho `X-Forwarded-For` e um hash de sessão. Os dados de auditoria não são exibidos na interface pública.
+
+A chamada de saída ao Ollama pode ser vinculada a um IP local específico por `OLLAMA_SOURCE_IP`. Em produção, esse valor deve ser o IP público autorizado no firewall do servidor Ollama. A configuração também pode exigir o host esperado por meio de `OLLAMA_ALLOWED_HOST`.
+
+## Estrutura
+
+| Caminho | Função |
+|---|---|
+| `public/index.php` | Front controller, atendimento, administração e integração com Ollama |
+| `database/schema.sql` | Schema completo para instalação nova |
+| `database/migration_001_confidence.sql` | Confiança e configurações do RAG |
+| `database/migration_002_audit.sql` | Auditoria de perguntas, respostas e metadados |
+| `config/.env.example` | Exemplo sanitizado de configuração |
+| `bin/bootstrap_admin.php` | Bootstrap de administrador por argumentos de linha de comando |
+| `bin/backup.sh` | Backup local do banco e configuração privada |
+
+## Configuração
+
+Copie `config/.env.example` para `config/.env` fora da árvore pública e substitua os placeholders. Nunca publique `config/.env`, dumps de banco, documentos do condomínio, logs, chaves SSH ou senhas.
+
+As variáveis essenciais são `DB_*`, `OLLAMA_URL`, `OLLAMA_ALLOWED_HOST`, `OLLAMA_SOURCE_IP`, `OLLAMA_CHAT_MODEL`, `OLLAMA_TIMEOUT`, `RAG_MIN_CONFIDENCE` e `RAG_MIN_SOURCES`. Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceitar somente o IP público do servidor web e, preferencialmente, proteja o transporte com VPN, túnel ou HTTPS.
+
+## Instalação
+
+Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e `pdftotext` para PDFs com camada de texto. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
+
+## Versionamento
+
+Cada alteração deve ter um commit descritivo e ser enviada ao repositório remoto. Antes do commit, execute uma busca por segredos e confirme que somente arquivos sanitizados serão publicados. O repositório público contém código e documentação genérica; dados de produção permanecem exclusivamente na VPS.
+
+## Aviso
+
+Este projeto é um ponto de partida operacional. A qualidade das respostas depende dos documentos indexados, da revisão humana e do modelo local selecionado. Para informações normativas, a fonte oficial e a administração do condomínio prevalecem sobre qualquer resposta automatizada.
