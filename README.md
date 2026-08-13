@@ -28,11 +28,15 @@ A chamada de saída ao Ollama pode ser vinculada a um IP local específico por `
 
 Copie `config/.env.example` para `config/.env` fora da árvore pública e substitua os placeholders. Nunca publique `config/.env`, dumps de banco, documentos do condomínio, logs, chaves SSH ou senhas.
 
-As variáveis essenciais são `DB_*`, `OLLAMA_URL`, `OLLAMA_ALLOWED_HOST`, `OLLAMA_SOURCE_IP`, `OLLAMA_CHAT_MODEL`, `OLLAMA_TIMEOUT`, `RAG_MIN_CONFIDENCE` e `RAG_MIN_SOURCES`. Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceitar somente o IP público do servidor web e, preferencialmente, proteja o transporte com VPN, túnel ou HTTPS.
+As variáveis essenciais são `DB_*`, `APP_TIMEZONE`, `OLLAMA_URL`, `OLLAMA_ALLOWED_HOST`, `OLLAMA_SOURCE_IP`, `OLLAMA_CHAT_MODEL`, `OLLAMA_TIMEOUT`, `RAG_MIN_CONFIDENCE` e `RAG_MIN_SOURCES`. Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceitar somente o IP público do servidor web e, preferencialmente, proteja o transporte com VPN, túnel ou HTTPS.
 
 ## Instalação
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como **Estatuto**, **Ata**, **Manutenção** (certificados, laudos e comprovantes técnicos) ou **Memória validada**. Na resposta pública, as fontes são exibidas no formato `Fonte: título do documento`. PDFs com camada de texto usam extração direta; PDFs digitalizados ou sem texto utilizam OCR controlado em `por+eng`. Os arquivos convertidos e imagens temporárias são removidos após o processamento. Os caminhos e parâmetros podem ser ajustados por `PDFTOTEXT_BIN`, `PDFTOPPM_BIN`, `TESSERACT_BIN`, `OCR_ENABLED`, `OCR_LANG` e `OCR_DPI`. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
+
+## Fila administrativa
+
+As perguntas encaminhadas para atendimento humano são exibidas pela data/hora da mensagem original do morador, em ordem decrescente: a mais recente aparece primeiro. Para cada item, o painel mostra a data e hora de recebimento e calcula o tempo transcorrido até o momento da consulta, usando o fuso definido em `APP_TIMEZONE` (por padrão, `America/Sao_Paulo`). A consulta seleciona somente a pergunta residente mais recente de cada conversa pendente, evitando duplicações.
 
 ## Versionamento
 

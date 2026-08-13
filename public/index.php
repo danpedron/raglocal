@@ -25,6 +25,8 @@ function load_env(string $file): void
 
 load_env(dirname(__DIR__) . '/config/.env');
 
+date_default_timezone_set((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Sao_Paulo'));
+
 function envv(string $key, string $default = ''): string
 {
     return (string) ($_ENV[$key] ?? getenv($key) ?? $default);
@@ -124,6 +126,63 @@ function ollama_source_ip(): string
 {
     $ip = trim(envv('OLLAMA_SOURCE_IP', ''));
     return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
+}
+
+function app_timezone(): DateTimeZone
+{
+    static $timezone;
+    if ($timezone instanceof DateTimeZone) {
+        return $timezone;
+    }
+    try {
+        $timezone = new DateTimeZone(envv('APP_TIMEZONE', 'America/Sao_Paulo'));
+    } catch (Throwable $error) {
+        $timezone = new DateTimeZone('America/Sao_Paulo');
+    }
+    return $timezone;
+}
+
+function parse_app_datetime(?string $value): ?DateTimeImmutable
+{
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    try {
+        return (new DateTimeImmutable($value, app_timezone()))->setTimezone(app_timezone());
+    } catch (Throwable $error) {
+        return null;
+    }
+}
+
+function format_datetime_br(?string $value): string
+{
+    $date = parse_app_datetime($value);
+    return $date ? $date->format('d/m/Y H:i:s') : 'data/hora não disponível';
+}
+
+function waiting_time(?string $value): string
+{
+    $date = parse_app_datetime($value);
+    if (!$date) {
+        return 'tempo de espera indisponível';
+    }
+    $now = new DateTimeImmutable('now', app_timezone());
+    $seconds = max(0, $now->getTimestamp() - $date->getTimestamp());
+    $days = intdiv($seconds, 86400);
+    $hours = intdiv($seconds % 86400, 3600);
+    $minutes = intdiv($seconds % 3600, 60);
+    $parts = [];
+    if ($days > 0) {
+        $parts[] = $days . ($days === 1 ? ' dia' : ' dias');
+    }
+    if ($hours > 0) {
+        $parts[] = $hours . ($hours === 1 ? ' hora' : ' horas');
+    }
+    if ($minutes > 0 || !$parts) {
+        $parts[] = $minutes . ($minutes === 1 ? ' minuto' : ' minutos');
+    }
+    return 'aguardando há ' . implode(' e ', $parts);
 }
 
 function h(string $value): string
@@ -558,7 +617,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $documents = $pdo->query('SELECT title, kind, status, created_at FROM documents ORDER BY id DESC LIMIT 30')->fetchAll();
-    $pending = $pdo->query("SELECT c.id, c.ai_draft, c.ai_confidence, c.ai_model, m.body FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.status = 'human_pending' AND m.sender = 'resident' ORDER BY c.updated_at DESC")->fetchAll();
+    $pending = $pdo->query("SELECT c.id, c.ai_draft, c.ai_confidence, c.ai_model, m.body, m.created_at AS question_created_at FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.status = 'human_pending' AND m.sender = 'resident' AND m.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.sender = 'resident') ORDER BY m.created_at DESC, m.id DESC")->fetchAll();
     $models = ollama_models();
     $selectedModel = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
     $minConfidence = rag_min_confidence();
@@ -573,7 +632,9 @@ if ($route === 'admin') {
     $body .= '<div class="card"><h2>Atendimentos pendentes</h2>';
     foreach ($pending as $item) {
         $confidence = $item['ai_confidence'] === null ? 'não calculada' : number_format((float) $item['ai_confidence'] * 100, 0, ',', '.') . '%';
-        $body .= '<form action="?route=answer" method="post" class="cite"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><b>Pergunta:</b> ' . h((string) $item['body']) . '<div class="reference"><b>Resposta calculada pelo modelo para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span>\n' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><textarea name="answer" placeholder="Resposta do atendente" required></textarea><button>Salvar resposta e ensinar a IA</button></form>';
+        $questionTime = format_datetime_br((string) $item['question_created_at']);
+        $waiting = waiting_time((string) $item['question_created_at']);
+        $body .= '<form action="?route=answer" method="post" class="cite"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="muted"><b>Recebida em:</b> ' . h($questionTime) . ' · <b>Tempo de espera:</b> ' . h($waiting) . '</div><b>Pergunta:</b> ' . h((string) $item['body']) . '<div class="reference"><b>Resposta calculada pelo modelo para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span>\n' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><textarea name="answer" placeholder="Resposta do atendente" required></textarea><button>Salvar resposta e ensinar a IA</button></form>';
     }
     if (!$pending) {
         $body .= '<p class="muted">Nenhuma pergunta pendente.</p>';
