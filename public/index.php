@@ -294,7 +294,7 @@ function ollama_timeout(): int
 
 function ollama_call(string $question, array $sources): array
 {
-    if (!empty($sources[0]['memory_exact'])) {
+    if (!empty($sources[0]['memory_validated'])) {
         if (preg_match('/^Pergunta:\\s*.*?\\s+Resposta validada:\\s*(.*)$/us', (string) $sources[0]['content'], $match)) {
             $validatedAnswer = trim((string) $match[1]);
             if ($validatedAnswer !== '') {
@@ -423,6 +423,57 @@ function normalize_memory_question(string $value): string
     return trim(preg_replace('/\\s+/u', ' ', $value) ?? '');
 }
 
+function memory_question_terms(string $value): array
+{
+    $normalized = normalize_memory_question($value);
+    if ($normalized === '') {
+        return [];
+    }
+
+    $ignored = [
+        'a', 'ao', 'aos', 'as', 'com', 'da', 'das', 'de', 'do', 'dos', 'e', 'em', 'entre',
+        'na', 'nas', 'no', 'nos', 'o', 'os', 'para', 'por', 'que', 'se', 'sem', 'sobre',
+        'um', 'uma', 'uns', 'umas', 'como', 'qual', 'quais', 'quando', 'onde', 'quem',
+        'porque', 'porquê', 'eu', 'me', 'meu', 'minha', 'meus', 'minhas', 'você', 'voce',
+        'te', 'seu', 'sua', 'pode', 'poderia', 'gostaria', 'quero', 'queria', 'saber',
+        'dizer', 'ensina', 'ensine', 'ensinar', 'fazer', 'faço', 'faca', 'faz', 'preparar',
+        'preparo', 'prepara', 'receita', 'modo', 'maneira', 'forma', 'elaborar', 'elabore',
+        'produzir', 'produza', 'obter', 'obtenho', 'conseguir', 'devo', 'deve', 'deveria',
+    ];
+
+    $terms = [];
+    foreach (explode(' ', $normalized) as $term) {
+        if (mb_strlen($term, 'UTF-8') < 2 || in_array($term, $ignored, true)) {
+            continue;
+        }
+        $terms[$term] = true;
+    }
+    return array_keys($terms);
+}
+
+function memory_question_similarity(string $left, string $right): float
+{
+    $leftTerms = memory_question_terms($left);
+    $rightTerms = memory_question_terms($right);
+    if (count($leftTerms) < 2 || count($rightTerms) < 2) {
+        return 0.0;
+    }
+
+    $intersection = count(array_intersect($leftTerms, $rightTerms));
+    if ($intersection < 2) {
+        return 0.0;
+    }
+    $union = count(array_unique(array_merge($leftTerms, $rightTerms)));
+    $jaccard = $intersection / max(1, $union);
+    $leftCoverage = $intersection / count($leftTerms);
+    $rightCoverage = $intersection / count($rightTerms);
+
+    if ($jaccard < 0.65 || $leftCoverage < 0.80 || $rightCoverage < 0.80) {
+        return 0.0;
+    }
+    return (0.50 * $jaccard) + (0.25 * $leftCoverage) + (0.25 * $rightCoverage);
+}
+
 function validated_memory_context(string $question): array
 {
     $normalizedQuestion = normalize_memory_question($question);
@@ -430,24 +481,47 @@ function validated_memory_context(string $question): array
         return [];
     }
 
-    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
+    $stmt = db()->query("SELECT c.id, c.content, d.title, d.kind
         FROM chunks c JOIN documents d ON d.id = c.document_id
         WHERE d.status = 'ready' AND d.kind = 'memoria'
-        ORDER BY score DESC, c.id DESC LIMIT 100");
-    $stmt->execute(['q' => $question]);
+        ORDER BY c.id DESC LIMIT 500");
+    $similar = [];
 
     foreach ($stmt->fetchAll() as $row) {
         if (!preg_match('/^Pergunta:\\s*(.*?)\\s+Resposta validada:/us', (string) $row['content'], $match)) {
             continue;
         }
-        if (normalize_memory_question((string) $match[1]) === $normalizedQuestion) {
+        $storedQuestion = (string) $match[1];
+        if (normalize_memory_question($storedQuestion) === $normalizedQuestion) {
             $row['score'] = 100000.0;
             $row['memory_exact'] = true;
+            $row['memory_validated'] = true;
             return [$row];
+        }
+
+        $score = memory_question_similarity($question, $storedQuestion);
+        if ($score >= 0.90) {
+            $row['score'] = $score;
+            $row['memory_similarity'] = $score;
+            $similar[] = $row;
         }
     }
 
-    return [];
+    if (!$similar) {
+        return [];
+    }
+    usort($similar, static fn (array $left, array $right): int => $right['score'] <=> $left['score']);
+    $best = $similar[0];
+    $second = $similar[1] ?? null;
+    if ($second && ((float) $best['score'] - (float) $second['score']) < 0.05) {
+        preg_match('/Resposta validada:\\s*(.*)$/us', (string) $best['content'], $bestAnswer);
+        preg_match('/Resposta validada:\\s*(.*)$/us', (string) $second['content'], $secondAnswer);
+        if (normalize_memory_question((string) ($bestAnswer[1] ?? '')) !== normalize_memory_question((string) ($secondAnswer[1] ?? ''))) {
+            return [];
+        }
+    }
+    $best['memory_validated'] = true;
+    return [$best];
 }
 
 function context(string $question): array
