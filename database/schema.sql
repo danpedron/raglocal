@@ -71,6 +71,7 @@ CREATE TABLE audit_logs (
   ai_confidence DECIMAL(5,4) NULL,
   ai_model VARCHAR(120) NULL,
   citations JSON NULL,
+  response_time_ms INT UNSIGNED NULL,
   source_ip VARCHAR(45) NULL,
   source_port SMALLINT UNSIGNED NULL,
   user_agent VARCHAR(512) NULL,

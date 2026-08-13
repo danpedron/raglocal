@@ -82,7 +82,7 @@ function audit_event(string $eventType, string $actor, array $event = []): void
         $metadata['route'] = (string) ($_GET['route'] ?? 'chat');
         $metadata['request_id'] = bin2hex(random_bytes(16));
         $metadata['extra'] = $event['metadata'] ?? [];
-        $stmt = db()->prepare('INSERT INTO audit_logs(event_type, actor, conversation_id, message_id, question, answer, ai_draft, ai_confidence, ai_model, citations, source_ip, source_port, user_agent, request_method, request_uri, referer, forwarded_for, host, session_hash, metadata) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt = db()->prepare('INSERT INTO audit_logs(event_type, actor, conversation_id, message_id, question, answer, ai_draft, ai_confidence, ai_model, citations, response_time_ms, source_ip, source_port, user_agent, request_method, request_uri, referer, forwarded_for, host, session_hash, metadata) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $eventType,
             $actor,
@@ -94,6 +94,7 @@ function audit_event(string $eventType, string $actor, array $event = []): void
             $event['ai_confidence'] ?? null,
             $event['ai_model'] ?? null,
             isset($event['citations']) ? json_encode($event['citations'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null,
+            isset($event['response_time_ms']) ? max(0, (int) $event['response_time_ms']) : null,
             $metadata['source_ip'],
             $metadata['source_port'],
             $metadata['user_agent'],
@@ -159,6 +160,15 @@ function format_datetime_br(?string $value): string
 {
     $date = parse_app_datetime($value);
     return $date ? $date->format('d/m/Y H:i:s') : 'data/hora não disponível';
+}
+
+function format_response_time(int $milliseconds): string
+{
+    $milliseconds = max(0, $milliseconds);
+    if ($milliseconds < 1000) {
+        return number_format($milliseconds, 0, ',', '.') . ' ms';
+    }
+    return number_format($milliseconds / 1000, 2, ',', '.') . ' s';
 }
 
 function waiting_time(?string $value): string
@@ -485,7 +495,7 @@ function split_text(string $text, int $size = 1800): array
 function layout(string $title, string $body): never
 {
     $logged = admin();
-    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — Jaraguá Tower IA</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}</style></head><body><main><div class="top"><h1>Jaraguá Tower IA</h1>' . ($logged ? '<a href="?route=admin">Administração</a>' : '') . '</div>' . $body . '</main></body></html>';
+    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — Jaraguá Tower IA</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}</style></head><body><main><div class="top"><h1>Jaraguá Tower IA</h1>' . ($logged ? '<a href="?route=admin">Administração</a>' : '') . '</div>' . $body . '</main></body></html>';
     exit;
 }
 
@@ -667,8 +677,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $pdo->prepare("INSERT INTO messages(conversation_id, sender, body) VALUES(?, 'resident', ?)")->execute([$conversationId, $question]);
     $residentMessageId = (int) $pdo->lastInsertId();
+    $startedAt = microtime(true);
     $sources = context($question);
     $result = ollama_call($question, $sources);
+    $responseTimeMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
     $reference = $result['answer'];
     if ($result['approved']) {
         $publicAnswer = $result['answer'];
@@ -688,11 +700,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $pdo->prepare('INSERT INTO messages(conversation_id, sender, body, citations) VALUES(?, \'ai\', ?, ?)')->execute([$conversationId, $publicAnswer, json_encode($citations, JSON_UNESCAPED_UNICODE)]);
     $aiMessageId = (int) $pdo->lastInsertId();
     audit_event('question', 'resident', ['conversation_id' => $conversationId, 'message_id' => $residentMessageId, 'question' => $question, 'metadata' => ['source_count' => count($sources)]]);
-    audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'metadata' => ['approved' => (bool) $result['approved'], 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources)]]);
+    audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'response_time_ms' => $responseTimeMs, 'metadata' => ['approved' => (bool) $result['approved'], 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources), 'response_time_ms' => $responseTimeMs]]);
     $body = '<div class="card"><h2>Resposta</h2><div class="answer">' . h($publicAnswer) . '</div>';
     foreach ($citations as $citation) {
-        $body .= '<div class="cite"><b>Fonte:</b> ' . h((string) $citation['title']) . '</div>';
+        $body .= '<div class="response-source"><b>Fonte:</b> ' . h((string) $citation['title']) . '</div>';
     }
+    $body .= '<div class="response-meta">Tempo para localizar e processar a resposta: ' . h(format_response_time($responseTimeMs)) . '</div>';
     if ($status === 'human_pending') {
         $body .= '<p class="muted">A pergunta e a resposta calculada pelo modelo foram registradas para análise administrativa.</p>';
     }
