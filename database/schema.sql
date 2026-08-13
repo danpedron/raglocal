@@ -15,7 +15,7 @@ CREATE TABLE settings (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT INTO settings(name, value) VALUES
-  ('brand_name', 'Base RAG'),
+  ('brand_name', 'RAGLocal'),
   ('brand_subtitle', 'Atendimento inteligente baseado na sua base de conhecimento'),
   ('brand_logo_filename', ''),
   ('brand_logo_mime', '')

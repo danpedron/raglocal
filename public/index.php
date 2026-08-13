@@ -253,8 +253,8 @@ function save_setting(string $key, string $value): void
 
 function brand_name(): string
 {
-    $value = trim(setting('brand_name', envv('APP_BRAND_NAME', 'Base RAG')));
-    return $value !== '' ? mb_substr($value, 0, 120, 'UTF-8') : 'Base RAG';
+    $value = trim(setting('brand_name', envv('APP_BRAND_NAME', 'RAGLocal')));
+    return $value !== '' ? mb_substr($value, 0, 120, 'UTF-8') : 'RAGLocal';
 }
 
 function brand_subtitle(): string
@@ -918,7 +918,7 @@ if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $newBrandName = trim((string) ($_POST['brand_name'] ?? brand_name()));
     $newBrandSubtitle = trim((string) ($_POST['brand_subtitle'] ?? brand_subtitle()));
     if ($newBrandName === '') {
-        $newBrandName = 'Base RAG';
+        $newBrandName = 'RAGLocal';
     }
     $newBrandName = mb_substr($newBrandName, 0, 120, 'UTF-8');
     $newBrandSubtitle = mb_substr($newBrandSubtitle, 0, 240, 'UTF-8');

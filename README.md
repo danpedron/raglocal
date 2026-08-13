@@ -1,4 +1,4 @@
-# RAG Assistant — base de conhecimento configurável
+# RAGLocal — RAG local configurável
 
 Aplicação PHP de **Retrieval-Augmented Generation (RAG)** para responder perguntas usando documentos indexados, como regulamentos internos, atas, certificados técnicos, políticas, manuais e memórias humanas validadas. Cada instalação pode representar uma empresa, condomínio, associação ou outra organização, sem identidade fixa no código.
 
