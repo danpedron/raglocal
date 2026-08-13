@@ -107,7 +107,7 @@ function audit_event(string $eventType, string $actor, array $event = []): void
             json_encode($metadata, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         ]);
     } catch (Throwable $error) {
-        error_log('Jaraguá Tower IA audit failure: ' . $error->getMessage());
+        error_log('RAG application audit failure: ' . $error->getMessage());
     }
 }
 
@@ -251,6 +251,41 @@ function save_setting(string $key, string $value): void
     $stmt->execute([$key, $value]);
 }
 
+function brand_name(): string
+{
+    $value = trim(setting('brand_name', envv('APP_BRAND_NAME', 'Base RAG')));
+    return $value !== '' ? mb_substr($value, 0, 120, 'UTF-8') : 'Base RAG';
+}
+
+function brand_subtitle(): string
+{
+    $value = trim(setting('brand_subtitle', envv('APP_BRAND_SUBTITLE', 'Atendimento inteligente baseado na sua base de conhecimento')));
+    return mb_substr($value, 0, 240, 'UTF-8');
+}
+
+function brand_logo_filename(): string
+{
+    $filename = basename(trim(setting('brand_logo_filename', '')));
+    return preg_match('/^brand-logo\\.(png|jpe?g|webp|gif)$/i', $filename) ? $filename : '';
+}
+
+function brand_logo_path(): string
+{
+    $filename = brand_logo_filename();
+    return $filename === '' ? '' : rag_storage_dir() . '/' . $filename;
+}
+
+function brand_logo_mime(): string
+{
+    return match (strtolower(pathinfo(brand_logo_filename(), PATHINFO_EXTENSION))) {
+        'png' => 'image/png',
+        'jpg', 'jpeg' => 'image/jpeg',
+        'webp' => 'image/webp',
+        'gif' => 'image/gif',
+        default => '',
+    };
+}
+
 function ollama_models(): array
 {
     return [
@@ -327,7 +362,7 @@ function ollama_call(string $question, array $sources): array
     }
     $context = implode("\n\n", $contextParts);
     $model = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
-    $prompt = "Você é o assistente oficial do Condomínio Jaraguá Tower.\n\n" .
+    $prompt = "Você é o assistente oficial de " . brand_name() . ".\n\n" .
         "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. Memórias marcadas como [RAG_MEMORIA_VALIDADA] são respostas humanas aprovadas e podem ser usadas como evidência quando a pergunta atual tiver a mesma intenção, mesmo que esteja formulada com outras palavras. Nesse caso, adapte a redação apenas o necessário e preserve o conteúdo da resposta validada; não acrescente conhecimento geral. " .
         "Se alguma fonte sustentar diretamente a resposta, responda em 1 a 3 frases completas, copiando ou resumindo somente os fatos dessa fonte; inclua o fato principal e a informação complementar mais relevante que esteja na mesma fonte, como serviço realizado, data ou validade. Se a pergunta pedir quando, informe a data e explique a que serviço ou evento ela se refere. Nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
         "Se nenhuma fonte sustentar diretamente a resposta, grounded deve ser false, confidence deve ser 0, source_numbers deve ser [] e answer deve dizer que não encontrou base suficiente. " .
@@ -644,7 +679,7 @@ function rag_heading(string $line): ?string
 
 function rag_tags(string $title, string $kind, string $heading): string
 {
-    $parts = [$title, document_kind_label($kind), 'condominio', 'jaragua tower', $heading];
+    $parts = [$title, document_kind_label($kind), 'base de conhecimento', brand_name(), $heading];
     $tags = [];
     foreach ($parts as $part) {
         $words = preg_split('/[^\\p{L}\\p{N}]+/u', mb_strtolower($part, 'UTF-8')) ?: [];
@@ -739,7 +774,7 @@ function build_rag_document(string $title, string $kind, string $sourceFilename,
     $normalized = normalize_document_text($text);
     $sourceSha256 = hash('sha256', $normalized);
     $sections = rag_sections($normalized);
-    $parserVersion = 'jaragua-rag-v1';
+    $parserVersion = 'rag-v1';
     $markdown = [
         '---',
         'rag_format: ' . $parserVersion,
@@ -813,11 +848,31 @@ function artifact_mime(string $path, string $fallback): string
 function layout(string $title, string $body): never
 {
     $logged = admin();
-    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — Jaraguá Tower IA</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}</style></head><body><main><div class="top"><h1>Jaraguá Tower IA</h1>' . ($logged ? '<a href="?route=admin">Administração</a>' : '') . '</div>' . $body . '</main></body></html>';
+    $brandName = brand_name();
+    $subtitle = brand_subtitle();
+    $logoPath = brand_logo_path();
+    $logoHtml = ($logoPath !== '' && is_file($logoPath)) ? '<img class="brand-logo" src="?route=brand-logo" alt="Logotipo de ' . h($brandName) . '">' : '';
+    $subtitleHtml = $subtitle !== '' ? '<div class="brand-subtitle">' . h($subtitle) . '</div>' : '';
+    $adminLink = $logged ? '<a href="?route=admin">Administração</a>' : '';
+    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — ' . h($brandName) . '</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{display:flex;gap:12px;align-items:center}.brand-logo{width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff}.brand-subtitle{color:#667085;font-size:.85em;margin-top:2px}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}</style></head><body><main><div class="top"><div class="brand">' . $logoHtml . '<div><h1>' . h($brandName) . '</h1>' . $subtitleHtml . '</div></div>' . $adminLink . '</div>' . $body . '</main></body></html>';
     exit;
 }
 
 $route = $_GET['route'] ?? 'chat';
+
+if ($route === 'brand-logo') {
+    $logoPath = brand_logo_path();
+    $mime = brand_logo_mime();
+    if ($logoPath === '' || $mime === '' || !is_file($logoPath)) {
+        http_response_code(404);
+        exit;
+    }
+    header('Content-Type: ' . $mime);
+    header('Content-Length: ' . (string) filesize($logoPath));
+    header('Cache-Control: public, max-age=300');
+    readfile($logoPath);
+    exit;
+}
 
 if ($route === 'logout') {
     session_destroy();
@@ -860,11 +915,53 @@ if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $confidence = max(0.50, min(0.99, (float) ($_POST['min_confidence'] ?? 0.75)));
     $sources = max(1, min(3, (int) ($_POST['min_sources'] ?? 1)));
     $timeout = max(20, min(180, (int) ($_POST['timeout'] ?? 120)));
+    $newBrandName = trim((string) ($_POST['brand_name'] ?? brand_name()));
+    $newBrandSubtitle = trim((string) ($_POST['brand_subtitle'] ?? brand_subtitle()));
+    if ($newBrandName === '') {
+        $newBrandName = 'Base RAG';
+    }
+    $newBrandName = mb_substr($newBrandName, 0, 120, 'UTF-8');
+    $newBrandSubtitle = mb_substr($newBrandSubtitle, 0, 240, 'UTF-8');
     save_setting('ollama_chat_model', $model);
     save_setting('rag_min_confidence', number_format($confidence, 2, '.', ''));
     save_setting('rag_min_sources', (string) $sources);
     save_setting('ollama_timeout', (string) $timeout);
-    flash('Configurações salvas.');
+    save_setting('brand_name', $newBrandName);
+    save_setting('brand_subtitle', $newBrandSubtitle);
+    if (!empty($_POST['remove_logo'])) {
+        $oldLogoPath = brand_logo_path();
+        if ($oldLogoPath !== '' && is_file($oldLogoPath)) {
+            @unlink($oldLogoPath);
+        }
+        save_setting('brand_logo_filename', '');
+        save_setting('brand_logo_mime', '');
+    }
+    $logoFile = $_FILES['logo'] ?? null;
+    if ($logoFile && $logoFile['error'] === UPLOAD_ERR_OK && is_uploaded_file($logoFile['tmp_name'])) {
+        $logoMap = ['image/png' => 'png', 'image/jpeg' => 'jpg', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+        $logoMime = function_exists('mime_content_type') ? (string) mime_content_type($logoFile['tmp_name']) : '';
+        $logoBytes = (int) ($logoFile['size'] ?? 0);
+        if ($logoBytes < 1 || $logoBytes > 2 * 1024 * 1024 || !isset($logoMap[$logoMime]) || !ensure_rag_storage()) {
+            flash('Configurações salvas, mas o logotipo foi rejeitado. Use PNG, JPG, WEBP ou GIF de até 2 MB.');
+        } else {
+            $logoFilename = 'brand-logo.' . $logoMap[$logoMime];
+            $logoPath = rag_storage_dir() . '/' . $logoFilename;
+            $oldLogoPath = brand_logo_path();
+            if (move_uploaded_file($logoFile['tmp_name'], $logoPath)) {
+                @chmod($logoPath, 0660);
+                if ($oldLogoPath !== '' && $oldLogoPath !== $logoPath && is_file($oldLogoPath)) {
+                    @unlink($oldLogoPath);
+                }
+                save_setting('brand_logo_filename', $logoFilename);
+                save_setting('brand_logo_mime', $logoMime);
+                flash('Configurações e logotipo salvos.');
+            } else {
+                flash('Configurações salvas, mas não foi possível gravar o logotipo.');
+            }
+        }
+    } else {
+        flash('Configurações de conexão, confiabilidade e marca salvas.');
+    }
     header('Location: ?route=admin');
     exit;
 }
@@ -984,7 +1081,11 @@ if ($route === 'admin') {
     $minConfidence = rag_min_confidence();
     $minSources = rag_min_sources();
     $timeout = ollama_timeout();
+    $currentBrandName = brand_name();
+    $currentBrandSubtitle = brand_subtitle();
+    $currentLogo = brand_logo_filename();
     $body = '<div class="card"><p><a href="?">Voltar ao atendimento</a> · <a href="?route=logout">Sair</a></p><h2>Base de conhecimento</h2>' . (!empty($flash = take_flash()) ? '<p>' . h($flash) . '</p>' : '') . '<form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '">Título<input name="title" required>Tipo<select name="kind"><option value="regimento">Regimento interno</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required><button>Enviar e indexar</button></form></div>';
+    $body .= '<div class="card"><h2>Identidade da empresa</h2><p class="muted">Personalize o nome, a descrição e o logotipo exibidos na página de perguntas.</p><form action="?route=settings" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="chat_model" value="' . h($selectedModel) . '"><input type="hidden" name="min_confidence" value="' . h(number_format($minConfidence, 2, '.', '')) . '"><input type="hidden" name="min_sources" value="' . h((string) $minSources) . '"><input type="hidden" name="timeout" value="' . h((string) $timeout) . '">Nome exibido<input name="brand_name" maxlength="120" value="' . h($currentBrandName) . '" required>Descrição curta<input name="brand_subtitle" maxlength="240" value="' . h($currentBrandSubtitle) . '">Logotipo<input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif"><span class="muted">PNG, JPG, WEBP ou GIF, até 2 MB. ' . ($currentLogo !== '' ? 'Logotipo atual: ' . h($currentLogo) . '.' : 'Nenhum logotipo configurado.') . '</span><label><input type="checkbox" name="remove_logo" value="1"> Remover logotipo atual</label><button>Salvar identidade</button></form></div>';
     $body .= '<div class="card"><h2>Confiabilidade e Ollama</h2><p class="muted">Endpoint: ' . h(envv('OLLAMA_URL', 'não configurado')) . '. A resposta só é publicada quando o modelo indica evidência suficiente, cita fontes válidas e supera o limiar abaixo. Caso contrário, o morador vê apenas o encaminhamento humano.</p><form action="?route=settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Modelo de chat<select name="chat_model">';
     foreach ($models as $model => $description) {
         $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';

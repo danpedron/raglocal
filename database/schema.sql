@@ -7,6 +7,20 @@ CREATE TABLE users (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE settings (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL UNIQUE,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO settings(name, value) VALUES
+  ('brand_name', 'Base RAG'),
+  ('brand_subtitle', 'Atendimento inteligente baseado na sua base de conhecimento'),
+  ('brand_logo_filename', ''),
+  ('brand_logo_mime', '')
+ON DUPLICATE KEY UPDATE name = VALUES(name);
+
 CREATE TABLE documents (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL,
