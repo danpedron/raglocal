@@ -34,6 +34,7 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_007_rag_artifacts.sql` | Artefatos Markdown privados e metadados estruturados de chunks |
 | `database/migration_008_branding.sql` | Nome, subtítulo e logotipo configuráveis |
 | `database/migration_009_markdown_only.sql` | Remoção de artefatos originais e retenção exclusiva do Markdown |
+| `database/migration_010_ignore_question.sql` | Perguntas ignoradas e resposta padrão fora do contexto |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |
@@ -52,11 +53,13 @@ Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotex
 
 Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Crie o administrador com `bin/bootstrap_admin.php`, informando opcionalmente o nome da pessoa ou equipe administradora como sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
-Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do original privado, do Markdown RAG e dos chunks no MariaDB.
+Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
 ## Fila administrativa e aprendizado controlado
 
-As perguntas encaminhadas para atendimento humano são exibidas pela data e hora da mensagem original, em ordem decrescente. O painel mostra o tempo de espera, o rascunho da IA e permite registrar a resposta validada. Essa resposta é incorporada à memória, mas continua sujeita à recuperação por intenção, à auditoria e às regras de fundamentação; ela não altera os parâmetros do modelo nem treina pesos do Ollama.
+As perguntas encaminhadas para atendimento humano são exibidas pela data e hora da mensagem original, em ordem decrescente. O painel mostra o tempo de espera, o rascunho da IA e permite registrar a resposta validada. Também é possível **ignorar uma pergunta sem responder**; nesse caso, ela sai da fila, a conversa é encerrada e a decisão permanece na auditoria.
+
+Quando a evidência é insuficiente, a resposta pública usa o texto configurado em **Confiabilidade e Ollama**. O marcador `{empresa}` é substituído automaticamente pelo nome definido em Identidade da empresa. O padrão inicial é: “As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.” Essa resposta pode ser personalizada sem alterar a política de fundamentação. A resposta humana validada é incorporada à memória, mas continua sujeita à recuperação por intenção, à auditoria e às regras de fundamentação; ela não altera os parâmetros do modelo nem treina pesos do Ollama.
 
 ## Versionamento e privacidade
 

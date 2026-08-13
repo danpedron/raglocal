@@ -263,6 +263,21 @@ function brand_subtitle(): string
     return mb_substr($value, 0, 240, 'UTF-8');
 }
 
+function default_scope_template(): string
+{
+    $default = 'As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.';
+    $value = trim(setting('default_scope_response', $default));
+    if ($value === '') {
+        $value = $default;
+    }
+    return mb_substr($value, 0, 500, 'UTF-8');
+}
+
+function default_scope_response(): string
+{
+    return str_replace(['{empresa}', '<nome da empresa>'], brand_name(), default_scope_template());
+}
+
 function brand_logo_filename(): string
 {
     $filename = basename(trim(setting('brand_logo_filename', '')));
@@ -854,7 +869,7 @@ function layout(string $title, string $body): never
     $logoHtml = ($logoPath !== '' && is_file($logoPath)) ? '<img class="brand-logo" src="?route=brand-logo" alt="Logotipo de ' . h($brandName) . '">' : '';
     $subtitleHtml = $subtitle !== '' ? '<div class="brand-subtitle">' . h($subtitle) . '</div>' : '';
     $adminLink = $logged ? '<a href="?route=admin">Administração</a>' : '';
-    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — ' . h($brandName) . '</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{display:flex;gap:12px;align-items:center}.brand-logo{width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff}.brand-subtitle{color:#667085;font-size:.85em;margin-top:2px}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}.admin-shell{margin-top:16px}.admin-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.admin-head h2{margin:4px 0}.admin-head p{margin:0}.admin-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.eyebrow{color:#667085;font-size:.75em;font-weight:700;letter-spacing:.08em}.admin-menu{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;padding:8px;background:#eef2f6;border-radius:10px}.admin-menu a{display:inline-flex;align-items:center;gap:7px;padding:10px 13px;border-radius:8px;text-decoration:none;color:#344054;font-weight:600}.admin-menu a:hover{background:#fff}.admin-menu a.active{background:#155eef;color:#fff}.nav-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:#d92d20;color:#fff;font-size:.78em}.admin-menu a.active .nav-count{background:#fff;color:#d92d20}.admin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}.admin-stat{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:13px 15px}.admin-stat strong{display:block;font-size:1.45em;color:#101828}.urgent-alert{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border:2px solid #d92d20;background:#fff1f0;color:#7a271a;border-radius:10px;padding:14px 16px;margin:14px 0}.urgent-alert strong{font-size:1.05em}.success-alert{border:1px solid #abefc6;background:#ecfdf3;color:#05603a;border-radius:10px;padding:12px 14px;margin:14px 0}.pending-card{border:2px solid #f04438;background:#fffafa;border-radius:10px;padding:15px;margin:14px 0}.pending-card .pending-meta{color:#7a271a;font-size:.9em;margin-bottom:8px}.pending-card textarea{min-height:100px}.section-intro{margin-top:-4px}.empty-state{padding:22px;text-align:center;border:1px dashed #cfd4dc;border-radius:10px;color:#667085}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{font-size:.8em;color:#667085;text-transform:uppercase;letter-spacing:.04em}@media(max-width:640px){th:nth-child(3),td:nth-child(3){display:none}.admin-menu a{flex:1 1 45%}}</style></head><body><main><div class="top"><div class="brand">' . $logoHtml . '<div><h1>' . h($brandName) . '</h1>' . $subtitleHtml . '</div></div>' . $adminLink . '</div>' . $body . '</main></body></html>';
+    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — ' . h($brandName) . '</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.button-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.button-secondary{background:#667085}.button-secondary:hover{background:#475467}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{display:flex;gap:12px;align-items:center}.brand-logo{width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff}.brand-subtitle{color:#667085;font-size:.85em;margin-top:2px}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}.admin-shell{margin-top:16px}.admin-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.admin-head h2{margin:4px 0}.admin-head p{margin:0}.admin-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.eyebrow{color:#667085;font-size:.75em;font-weight:700;letter-spacing:.08em}.admin-menu{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;padding:8px;background:#eef2f6;border-radius:10px}.admin-menu a{display:inline-flex;align-items:center;gap:7px;padding:10px 13px;border-radius:8px;text-decoration:none;color:#344054;font-weight:600}.admin-menu a:hover{background:#fff}.admin-menu a.active{background:#155eef;color:#fff}.nav-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:#d92d20;color:#fff;font-size:.78em}.admin-menu a.active .nav-count{background:#fff;color:#d92d20}.admin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}.admin-stat{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:13px 15px}.admin-stat strong{display:block;font-size:1.45em;color:#101828}.urgent-alert{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border:2px solid #d92d20;background:#fff1f0;color:#7a271a;border-radius:10px;padding:14px 16px;margin:14px 0}.urgent-alert strong{font-size:1.05em}.success-alert{border:1px solid #abefc6;background:#ecfdf3;color:#05603a;border-radius:10px;padding:12px 14px;margin:14px 0}.pending-card{border:2px solid #f04438;background:#fffafa;border-radius:10px;padding:15px;margin:14px 0}.pending-card .pending-meta{color:#7a271a;font-size:.9em;margin-bottom:8px}.pending-card textarea{min-height:100px}.section-intro{margin-top:-4px}.empty-state{padding:22px;text-align:center;border:1px dashed #cfd4dc;border-radius:10px;color:#667085}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{font-size:.8em;color:#667085;text-transform:uppercase;letter-spacing:.04em}@media(max-width:640px){th:nth-child(3),td:nth-child(3){display:none}.admin-menu a{flex:1 1 45%}}</style></head><body><main><div class="top"><div class="brand">' . $logoHtml . '<div><h1>' . h($brandName) . '</h1>' . $subtitleHtml . '</div></div>' . $adminLink . '</div>' . $body . '</main></body></html>';
     exit;
 }
 
@@ -917,6 +932,11 @@ if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $timeout = max(20, min(180, (int) ($_POST['timeout'] ?? 120)));
     $newBrandName = trim((string) ($_POST['brand_name'] ?? brand_name()));
     $newBrandSubtitle = trim((string) ($_POST['brand_subtitle'] ?? brand_subtitle()));
+    $newDefaultScopeResponse = trim((string) ($_POST['default_scope_response'] ?? default_scope_template()));
+    if ($newDefaultScopeResponse === '') {
+        $newDefaultScopeResponse = 'As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.';
+    }
+    $newDefaultScopeResponse = mb_substr($newDefaultScopeResponse, 0, 500, 'UTF-8');
     if ($newBrandName === '') {
         $newBrandName = 'RAGLocal';
     }
@@ -928,6 +948,7 @@ if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     save_setting('ollama_timeout', (string) $timeout);
     save_setting('brand_name', $newBrandName);
     save_setting('brand_subtitle', $newBrandSubtitle);
+    save_setting('default_scope_response', $newDefaultScopeResponse);
     if (!empty($_POST['remove_logo'])) {
         $oldLogoPath = brand_logo_path();
         if ($oldLogoPath !== '' && is_file($oldLogoPath)) {
@@ -1031,6 +1052,24 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
+if ($route === 'ignore' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $conversationId = (int) ($_POST['conversation_id'] ?? 0);
+    $pdo = db();
+    $stmt = $pdo->prepare("SELECT c.id, m.body FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.id = ? AND c.status = 'human_pending' AND m.sender = 'resident' ORDER BY m.id DESC LIMIT 1");
+    $stmt->execute([$conversationId]);
+    $question = $stmt->fetch();
+    if ($question) {
+        $pdo->prepare("UPDATE conversations SET status = 'closed' WHERE id = ? AND status = 'human_pending'")->execute([$conversationId]);
+        audit_event('question_ignored', 'admin', ['conversation_id' => $conversationId, 'question' => (string) $question['body'], 'metadata' => ['ignored_by' => (int) $_SESSION['user']['id'], 'reason' => 'admin_ignored_without_answer']]);
+        flash('Pergunta ignorada e removida da fila. O histórico foi preservado na auditoria.');
+    } else {
+        flash('A pergunta não está mais pendente.');
+    }
+    header('Location: ?route=admin&section=pending');
+    exit;
+}
+
 if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $pdo = db();
@@ -1080,6 +1119,7 @@ if ($route === 'admin') {
     $currentBrandName = brand_name();
     $currentBrandSubtitle = brand_subtitle();
     $currentLogo = brand_logo_filename();
+    $defaultScopeResponse = default_scope_template();
     $flashMessage = take_flash();
     $menuLink = static function (string $key, string $label, string $count = '') use ($section): string {
         $active = $section === $key ? ' active' : '';
@@ -1106,7 +1146,7 @@ if ($route === 'admin') {
                 $confidence = $item['ai_confidence'] === null ? 'não calculada' : number_format((float) $item['ai_confidence'] * 100, 0, ',', '.') . '%';
                 $questionTime = format_datetime_br((string) $item['question_created_at']);
                 $waiting = waiting_time((string) $item['question_created_at']);
-                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><button>Salvar resposta e ensinar a IA</button></form>';
+                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><div class="button-row"><button>Salvar resposta e ensinar a IA</button><button type="submit" formaction="?route=ignore" formmethod="post" formnovalidate class="button-secondary">Ignorar sem responder</button></div></form>';
             }
         } else {
             $body .= '<div class="empty-state">A fila está vazia. Quando uma pergunta não tiver evidência suficiente, ela aparecerá aqui com destaque.</div>';
@@ -1128,7 +1168,7 @@ if ($route === 'admin') {
         foreach ($models as $model => $description) {
             $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
         }
-        $body .= '</select></label><label>Limiar mínimo de confiança (0,50 a 0,99)<input name="min_confidence" type="number" min="0.50" max="0.99" step="0.01" value="' . h(number_format($minConfidence, 2, '.', '')) . '"></label><label>Fontes mínimas citadas<input name="min_sources" type="number" min="1" max="3" step="1" value="' . h((string) $minSources) . '"></label><label>Tempo máximo de consulta (segundos)<input name="timeout" type="number" min="20" max="180" step="5" value="' . h((string) $timeout) . '"></label><button>Salvar configurações</button></form><p class="muted">Para hardware limitado, comece com <b>qwen3:4b</b>, já instalado, e limiar 0,75. Modelos de 1B são alternativas mais leves, mas precisam ser instalados no servidor Ollama antes do uso.</p></div>';
+        $body .= '</select></label><label>Limiar mínimo de confiança (0,50 a 0,99)<input name="min_confidence" type="number" min="0.50" max="0.99" step="0.01" value="' . h(number_format($minConfidence, 2, '.', '')) . '"></label><label>Fontes mínimas citadas<input name="min_sources" type="number" min="1" max="3" step="1" value="' . h((string) $minSources) . '"></label><label>Tempo máximo de consulta (segundos)<input name="timeout" type="number" min="20" max="180" step="5" value="' . h((string) $timeout) . '"></label><label>Resposta padrão para perguntas fora do contexto<textarea name="default_scope_response" maxlength="500" rows="4">' . h($defaultScopeResponse) . '</textarea><span class="muted">Use <code>{empresa}</code> para inserir automaticamente o nome configurado da empresa.</span><button>Salvar configurações</button></form><p class="muted">Para hardware limitado, comece com <b>qwen3:4b</b>, já instalado, e limiar 0,75. Modelos de 1B são alternativas mais leves, mas precisam ser instalados no servidor Ollama antes do uso.</p></div>';
     }
     $body .= '</div>';
     layout('Administração', $body);
@@ -1163,7 +1203,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $publicAnswer = $result['answer'];
         $status = 'answered';
     } else {
-        $publicAnswer = 'Não encontrei base suficiente no regimento interno, nas atas ou nas respostas validadas. Sua dúvida foi encaminhada a um atendente humano.';
+        $publicAnswer = default_scope_response();
         $status = 'human_pending';
     }
     $pdo->prepare('UPDATE conversations SET status = ?, ai_draft = ?, ai_confidence = ?, ai_model = ? WHERE id = ?')->execute([$status, $reference !== '' ? $reference : null, $result['confidence'], $result['model'], $conversationId]);

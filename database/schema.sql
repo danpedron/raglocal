@@ -18,7 +18,8 @@ INSERT INTO settings(name, value) VALUES
   ('brand_name', 'RAGLocal'),
   ('brand_subtitle', 'Atendimento inteligente baseado na sua base de conhecimento'),
   ('brand_logo_filename', ''),
-  ('brand_logo_mime', '')
+  ('brand_logo_mime', ''),
+  ('default_scope_response', 'As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.')
 ON DUPLICATE KEY UPDATE name = VALUES(name);
 
 CREATE TABLE documents (
@@ -99,7 +100,7 @@ CREATE TABLE human_answers (
 
 CREATE TABLE audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload') NOT NULL,
+  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored') NOT NULL,
   actor ENUM('resident','ai','human','admin','system') NOT NULL,
   conversation_id BIGINT UNSIGNED NULL,
   message_id BIGINT UNSIGNED NULL,
