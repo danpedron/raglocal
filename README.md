@@ -31,7 +31,7 @@ As variáveis essenciais são `DB_*`, `OLLAMA_URL`, `OLLAMA_ALLOWED_HOST`, `OLLA
 
 ## Instalação
 
-Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e `pdftotext` para PDFs com camada de texto. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
+Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. PDFs com camada de texto usam extração direta; PDFs digitalizados ou sem texto utilizam OCR controlado em `por+eng`. Os arquivos convertidos e imagens temporárias são removidos após o processamento. Os caminhos e parâmetros podem ser ajustados por `PDFTOTEXT_BIN`, `PDFTOPPM_BIN`, `TESSERACT_BIN`, `OCR_ENABLED`, `OCR_LANG` e `OCR_DPI`. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
 
 ## Versionamento
 

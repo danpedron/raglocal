@@ -334,19 +334,64 @@ function context(string $question): array
     return $stmt->fetchAll();
 }
 
+function run_process(string $command): string
+{
+    $output = shell_exec($command . ' 2>/dev/null');
+    return is_string($output) ? $output : '';
+}
+
+function extract_pdf_text(string $file): string
+{
+    $temporary = tempnam(sys_get_temp_dir(), 'jt_pdf_');
+    if ($temporary === false || !copy($file, $temporary)) {
+        if ($temporary !== false) {
+            @unlink($temporary);
+        }
+        return '';
+    }
+
+    $pdfToText = envv('PDFTOTEXT_BIN', '/usr/bin/pdftotext');
+    $text = run_process(escapeshellarg($pdfToText) . ' -enc UTF-8 -layout ' . escapeshellarg($temporary) . ' -');
+    if (trim($text) !== '') {
+        @unlink($temporary);
+        return trim($text);
+    }
+
+    if (envv('OCR_ENABLED', '1') !== '1') {
+        @unlink($temporary);
+        return '';
+    }
+
+    $pdfToPpm = envv('PDFTOPPM_BIN', '/usr/bin/pdftoppm');
+    $tesseract = envv('TESSERACT_BIN', '/usr/bin/tesseract');
+    $ocrLanguage = preg_replace('/[^a-zA-Z0-9+_-]/', '', envv('OCR_LANG', 'por+eng')) ?: 'por+eng';
+    $dpi = max(120, min(300, (int) envv('OCR_DPI', '200')));
+    $prefix = tempnam(sys_get_temp_dir(), 'jt_ocr_');
+    if ($prefix === false) {
+        @unlink($temporary);
+        return '';
+    }
+    @unlink($prefix);
+    run_process(escapeshellarg($pdfToPpm) . ' -r ' . $dpi . ' -png -f 1 -l 60 ' . escapeshellarg($temporary) . ' ' . escapeshellarg($prefix));
+    $pages = glob($prefix . '-*.png') ?: [];
+    natsort($pages);
+    $ocrText = '';
+    foreach ($pages as $page) {
+        $ocrText .= "\n" . run_process(escapeshellarg($tesseract) . ' ' . escapeshellarg($page) . ' stdout -l ' . escapeshellarg($ocrLanguage) . ' --psm 6');
+        @unlink($page);
+    }
+    @unlink($temporary);
+    return trim($ocrText);
+}
+
 function extract_text(string $file, string $name): string
 {
     $extension = strtolower(pathinfo($name, PATHINFO_EXTENSION));
     if ($extension === 'pdf') {
-        $temporary = tempnam(sys_get_temp_dir(), 'jt_');
-        if ($temporary === false || !copy($file, $temporary)) {
-            return '';
-        }
-        $text = shell_exec('pdftotext -enc UTF-8 ' . escapeshellarg($temporary) . ' - 2>/dev/null');
-        @unlink($temporary);
-        return (string) $text;
+        return extract_pdf_text($file);
     }
-    return (string) file_get_contents($file);
+    $text = file_get_contents($file);
+    return is_string($text) ? $text : '';
 }
 
 function split_text(string $text, int $size = 1800): array
