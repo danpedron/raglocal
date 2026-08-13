@@ -194,6 +194,17 @@ function ollama_models(): array
     ];
 }
 
+function document_kind_label(string $kind): string
+{
+    return match ($kind) {
+        'estatuto' => 'Estatuto',
+        'ata' => 'Ata',
+        'memoria' => 'Memória validada',
+        'manutencao' => 'Manutenção',
+        default => $kind,
+    };
+}
+
 function rag_min_confidence(): float
 {
     $value = (float) setting('rag_min_confidence', envv('RAG_MIN_CONFIDENCE', '0.75'));
@@ -228,13 +239,13 @@ function ollama_call(string $question, array $sources): array
     $contextParts = [];
     foreach ($sources as $index => $source) {
         $number = $index + 1;
-        $contextParts[] = '[' . $number . '] Documento: ' . $source['title'] . ' | Tipo: ' . $source['kind'] . "\n" . $source['content'];
+        $contextParts[] = '[' . $number . '] Documento: ' . $source['title'] . ' | Tipo: ' . document_kind_label((string) $source['kind']) . "\n" . $source['content'];
     }
     $context = implode("\n\n", $contextParts);
     $model = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
     $prompt = "Você é o assistente oficial do Condomínio Jaraguá Tower.\n\n" .
         "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. " .
-        "Se alguma fonte sustentar diretamente a resposta, responda copiando ou resumindo somente os fatos dessa fonte; nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
+        "Se alguma fonte sustentar diretamente a resposta, responda em 1 a 3 frases completas, copiando ou resumindo somente os fatos dessa fonte; inclua o fato principal e a informação complementar mais relevante que esteja na mesma fonte, como serviço realizado, data ou validade. Se a pergunta pedir quando, informe a data e explique a que serviço ou evento ela se refere. Nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
         "Se nenhuma fonte sustentar diretamente a resposta, grounded deve ser false, confidence deve ser 0, source_numbers deve ser [] e answer deve dizer que não encontrou base suficiente. " .
         "Nunca use conhecimento geral, não complete lacunas, não faça suposições e não invente horários, multas, artigos, datas, decisões ou interpretações. " .
         "Retorne SOMENTE um JSON válido, sem markdown, exatamente com estas chaves: grounded (boolean), confidence (number), answer (string em português brasileiro), source_numbers (array de números).\n\n" .
@@ -491,7 +502,7 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $stmt = $pdo->prepare('INSERT INTO documents(title, kind, source_filename, status, created_by) VALUES(?, ?, ?, ?, ?)');
                 $kind = (string) ($_POST['kind'] ?? 'estatuto');
-                if (!in_array($kind, ['estatuto', 'ata', 'memoria'], true)) {
+                if (!in_array($kind, ['estatuto', 'ata', 'memoria', 'manutencao'], true)) {
                     $kind = 'estatuto';
                 }
                 $title = trim((string) ($_POST['title'] ?? '')) ?: pathinfo((string) $file['name'], PATHINFO_FILENAME);
@@ -553,7 +564,7 @@ if ($route === 'admin') {
     $minConfidence = rag_min_confidence();
     $minSources = rag_min_sources();
     $timeout = ollama_timeout();
-    $body = '<div class="card"><p><a href="?">Voltar ao atendimento</a> · <a href="?route=logout">Sair</a></p><h2>Base de conhecimento</h2>' . (!empty($flash = take_flash()) ? '<p>' . h($flash) . '</p>' : '') . '<form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '">Título<input name="title" required>Tipo<select name="kind"><option value="estatuto">Estatuto</option><option value="ata">Ata</option><option value="memoria">Memória validada</option></select>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required><button>Enviar e indexar</button></form></div>';
+    $body = '<div class="card"><p><a href="?">Voltar ao atendimento</a> · <a href="?route=logout">Sair</a></p><h2>Base de conhecimento</h2>' . (!empty($flash = take_flash()) ? '<p>' . h($flash) . '</p>' : '') . '<form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '">Título<input name="title" required>Tipo<select name="kind"><option value="estatuto">Estatuto</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required><button>Enviar e indexar</button></form></div>';
     $body .= '<div class="card"><h2>Confiabilidade e Ollama</h2><p class="muted">Endpoint: ' . h(envv('OLLAMA_URL', 'não configurado')) . '. A resposta só é publicada quando o modelo indica evidência suficiente, cita fontes válidas e supera o limiar abaixo. Caso contrário, o morador vê apenas o encaminhamento humano.</p><form action="?route=settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Modelo de chat<select name="chat_model">';
     foreach ($models as $model => $description) {
         $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
@@ -569,7 +580,7 @@ if ($route === 'admin') {
     }
     $body .= '</div><div class="card"><h2>Documentos</h2><ul>';
     foreach ($documents as $document) {
-        $body .= '<li>' . h((string) $document['title']) . ' — ' . h((string) $document['kind']) . ' — ' . h((string) $document['status']) . '</li>';
+        $body .= '<li>' . h((string) $document['title']) . ' — ' . h(document_kind_label((string) $document['kind'])) . ' — ' . h((string) $document['status']) . '</li>';
     }
     $body .= '</ul></div>';
     layout('Administração', $body);
@@ -619,7 +630,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'metadata' => ['approved' => (bool) $result['approved'], 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources)]]);
     $body = '<div class="card"><h2>Resposta</h2><div class="answer">' . h($publicAnswer) . '</div>';
     foreach ($citations as $citation) {
-        $body .= '<div class="cite"><b>' . h((string) $citation['title']) . '</b> <span class="muted">(' . h((string) $citation['kind']) . ')</span></div>';
+        $body .= '<div class="cite"><b>Fonte:</b> ' . h((string) $citation['title']) . '</div>';
     }
     if ($status === 'human_pending') {
         $body .= '<p class="muted">A pergunta e a resposta calculada pelo modelo foram registradas para análise administrativa.</p>';

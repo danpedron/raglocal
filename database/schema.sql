@@ -10,7 +10,7 @@ CREATE TABLE users (
 CREATE TABLE documents (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL,
-  kind ENUM('estatuto','ata','memoria') NOT NULL,
+  kind ENUM('estatuto','ata','memoria','manutencao') NOT NULL,
   source_filename VARCHAR(255) NULL,
   status ENUM('processing','ready','error') NOT NULL DEFAULT 'processing',
   created_by BIGINT UNSIGNED NULL,
