@@ -294,6 +294,22 @@ function ollama_timeout(): int
 
 function ollama_call(string $question, array $sources): array
 {
+    if (!empty($sources[0]['memory_exact'])) {
+        if (preg_match('/^Pergunta:\\s*.*?\\s+Resposta validada:\\s*(.*)$/us', (string) $sources[0]['content'], $match)) {
+            $validatedAnswer = trim((string) $match[1]);
+            if ($validatedAnswer !== '') {
+                return [
+                    'approved' => true,
+                    'answer' => $validatedAnswer,
+                    'confidence' => 1.0,
+                    'source_numbers' => [1],
+                    'model' => 'memoria-validada',
+                    'error' => '',
+                ];
+            }
+        }
+    }
+
     if (!$sources) {
         return [
             'approved' => false,
@@ -426,6 +442,7 @@ function validated_memory_context(string $question): array
         }
         if (normalize_memory_question((string) $match[1]) === $normalizedQuestion) {
             $row['score'] = 100000.0;
+            $row['memory_exact'] = true;
             return [$row];
         }
     }
