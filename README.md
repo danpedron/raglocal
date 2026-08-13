@@ -6,7 +6,7 @@ Aplicação PHP de RAG para responder dúvidas sobre estatuto, atas e respostas 
 
 A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência.
 
-Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas são registradas na tabela `audit_logs`, junto com o IP de origem, porta de origem quando fornecida pelo proxy, User-Agent, método, URI, host, referenciador, cabeçalho `X-Forwarded-For` e um hash de sessão. Os dados de auditoria não são exibidos na interface pública.
+Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas são registradas na tabela `audit_logs`, junto com o IP de origem, porta de origem quando fornecida pelo proxy, User-Agent, método, URI, host, referenciador, cabeçalho `X-Forwarded-For` e um hash de sessão. Os dados de auditoria não são exibidos na interface pública. A migração de backfill cobre mensagens anteriores, mas marca que os metadados de origem não estavam disponíveis antes da instrumentação.
 
 A chamada de saída ao Ollama pode ser vinculada a um IP local específico por `OLLAMA_SOURCE_IP`. Em produção, esse valor deve ser o IP público autorizado no firewall do servidor Ollama. A configuração também pode exigir o host esperado por meio de `OLLAMA_ALLOWED_HOST`.
 
@@ -18,6 +18,7 @@ A chamada de saída ao Ollama pode ser vinculada a um IP local específico por `
 | `database/schema.sql` | Schema completo para instalação nova |
 | `database/migration_001_confidence.sql` | Confiança e configurações do RAG |
 | `database/migration_002_audit.sql` | Auditoria de perguntas, respostas e metadados |
+| `database/migration_003_backfill_audit.sql` | Backfill idempotente de mensagens históricas |
 | `config/.env.example` | Exemplo sanitizado de configuração |
 | `bin/bootstrap_admin.php` | Bootstrap de administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup local do banco e configuração privada |
