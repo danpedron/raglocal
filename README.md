@@ -16,7 +16,7 @@ A aplicação só publica uma resposta automática quando há evidência recuper
 
 Respostas humanas validadas entram novamente no RAG como memória aprovada. Para coincidência exata, a resposta pode ser reutilizada de forma determinística; para formulações equivalentes, a memória é enviada como contexto confiável ao Ollama, que precisa responder à pergunta atual exclusivamente com base nessa evidência. A equivalência exige cobertura lexical alta e, em caso de empate entre memórias com respostas diferentes, não é aplicada. Assim, o sistema aprende novas evidências sem se transformar em um mecanismo que apenas reproduz respostas humanas ou em um processo de treinamento não auditado.
 
-Durante o upload, PDF, TXT e MD são convertidos para um Markdown canônico compatível com o contexto do Qwen3. O artefato inclui front matter, identificador de formato, tipo documental, hash, seções e marcadores `[RAG_DOCUMENTO]`, `[FONTE]`, `[TIPO]`, `[SEÇÃO]` e `[TAGS]`. Os chunks também guardam título da seção, tags, páginas quando identificáveis e contagem aproximada de tokens. O original e o Markdown ficam em armazenamento privado; o Markdown é mantido no MariaDB como artefato versionável por hash e os chunks são indexados com FULLTEXT.
+Durante o upload, PDF, TXT e MD são convertidos para um Markdown canônico compatível com o contexto do Qwen3. O arquivo enviado é usado apenas durante a conversão e não é persistido. O único artefato armazenado é o Markdown, que inclui front matter, identificador de formato, tipo documental, hash, seções e marcadores `[RAG_DOCUMENTO]`, `[FONTE]`, `[TIPO]`, `[SEÇÃO]` e `[TAGS]`. Os chunks também guardam título da seção, tags, páginas quando identificáveis e contagem aproximada de tokens. O Markdown fica em armazenamento privado e no MariaDB como artefato versionável por hash; os chunks são indexados com FULLTEXT.
 
 Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas são registradas na tabela `audit_logs`, junto com IP de origem, porta quando fornecida pelo proxy, User-Agent, método, URI, host, referenciador, cabeçalho `X-Forwarded-For` e hash de sessão. Os dados de auditoria não são exibidos na interface pública.
 
@@ -33,6 +33,7 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_006_response_timing.sql` | Duração das respostas automáticas na auditoria |
 | `database/migration_007_rag_artifacts.sql` | Artefatos Markdown privados e metadados estruturados de chunks |
 | `database/migration_008_branding.sql` | Nome, subtítulo e logotipo configuráveis |
+| `database/migration_009_markdown_only.sql` | Remoção de artefatos originais e retenção exclusiva do Markdown |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |

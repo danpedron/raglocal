@@ -970,7 +970,6 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $file = $_FILES['document'] ?? null;
     $maximumBytes = 10 * 1024 * 1024;
-    $storedOriginalPath = null;
     $storedMarkdownPath = null;
     if (!$file || $file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name']) || (int) $file['size'] > $maximumBytes) {
         flash('Falha no upload. O limite é 10 MB.');
@@ -999,21 +998,14 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->execute([$title, $kind, (string) $file['name'], 'processing', $rag['parser_version'], $rag['canonical_sha256'], $_SESSION['user']['id']]);
                 $documentId = (int) $pdo->lastInsertId();
                 $storageDir = rag_storage_dir();
-                $originalFilename = 'document-' . $documentId . '.source.' . $extension;
                 $markdownFilename = 'document-' . $documentId . '.rag.md';
-                $storedOriginalPath = $storageDir . '/' . $originalFilename;
                 $storedMarkdownPath = $storageDir . '/' . $markdownFilename;
-                if (!move_uploaded_file($file['tmp_name'], $storedOriginalPath)) {
-                    throw new RuntimeException('Falha ao armazenar o arquivo original.');
-                }
-                @chmod($storedOriginalPath, 0660);
                 $markdownBytes = file_put_contents($storedMarkdownPath, $rag['markdown'], LOCK_EX);
                 if ($markdownBytes === false || $markdownBytes !== strlen($rag['markdown'])) {
                     throw new RuntimeException('Falha ao armazenar o Markdown RAG.');
                 }
                 @chmod($storedMarkdownPath, 0660);
                 $artifactStmt = $pdo->prepare('INSERT INTO document_artifacts(document_id, artifact_type, filename, storage_path, mime_type, byte_size, sha256, content) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
-                $artifactStmt->execute([$documentId, 'original', (string) $file['name'], 'storage/uploads/' . $originalFilename, artifact_mime($storedOriginalPath, 'application/octet-stream'), (int) filesize($storedOriginalPath), $sourceSha256, null]);
                 $artifactStmt->execute([$documentId, 'markdown', $markdownFilename, 'storage/uploads/' . $markdownFilename, 'text/markdown; charset=UTF-8', $markdownBytes, $rag['canonical_sha256'], $rag['markdown']]);
                 $insertChunk = $pdo->prepare('INSERT INTO chunks(document_id, chunk_no, content, section_heading, tags, page_start, page_end, token_count) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
                 foreach ($rag['chunks'] as $number => $chunk) {
@@ -1028,9 +1020,6 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('Documento convertido para Markdown RAG e indexado com sucesso.');
             } catch (Throwable $error) {
                 $pdo->rollBack();
-                if ($storedOriginalPath !== null) {
-                    @unlink($storedOriginalPath);
-                }
                 if ($storedMarkdownPath !== null) {
                     @unlink($storedMarkdownPath);
                 }

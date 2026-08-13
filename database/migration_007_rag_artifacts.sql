@@ -1,8 +1,8 @@
--- Artefatos privados da ingestão: original recebido e Markdown canônico para RAG.
+-- Artefato privado da ingestão: Markdown canônico para RAG.
 CREATE TABLE IF NOT EXISTS document_artifacts (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   document_id BIGINT UNSIGNED NOT NULL,
-  artifact_type ENUM('original','markdown') NOT NULL,
+  artifact_type ENUM('markdown') NOT NULL,
   filename VARCHAR(255) NOT NULL,
   storage_path VARCHAR(500) NOT NULL,
   mime_type VARCHAR(120) NOT NULL,
