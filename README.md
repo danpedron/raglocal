@@ -1,6 +1,6 @@
 # Jaraguá Tower IA
 
-Aplicação PHP de RAG para responder dúvidas sobre estatuto, atas, documentos de manutenção técnica e respostas validadas de um condomínio. O sistema usa MariaDB para indexação textual e integra-se a um servidor Ollama configurado externamente.
+Aplicação PHP de RAG para responder dúvidas sobre regimento interno, atas, documentos de manutenção técnica e respostas validadas de um condomínio. O sistema usa MariaDB para indexação textual e integra-se a um servidor Ollama configurado externamente.
 
 ## Princípios de segurança
 
@@ -32,7 +32,7 @@ As variáveis essenciais são `DB_*`, `APP_TIMEZONE`, `OLLAMA_URL`, `OLLAMA_ALLO
 
 ## Instalação
 
-Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como **Estatuto**, **Ata**, **Manutenção** (certificados, laudos e comprovantes técnicos) ou **Memória validada**. Na resposta pública, as fontes são exibidas no formato `Fonte: título do documento`. PDFs com camada de texto usam extração direta; PDFs digitalizados ou sem texto utilizam OCR controlado em `por+eng`. Os arquivos convertidos e imagens temporárias são removidos após o processamento. Os caminhos e parâmetros podem ser ajustados por `PDFTOTEXT_BIN`, `PDFTOPPM_BIN`, `TESSERACT_BIN`, `OCR_ENABLED`, `OCR_LANG` e `OCR_DPI`. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
+Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como **Regimento interno**, **Ata**, **Manutenção** (certificados, laudos e comprovantes técnicos) ou **Memória validada**. Na resposta pública, as fontes são exibidas no formato `Fonte: título do documento`. PDFs com camada de texto usam extração direta; PDFs digitalizados ou sem texto utilizam OCR controlado em `por+eng`. Os arquivos convertidos e imagens temporárias são removidos após o processamento. Os caminhos e parâmetros podem ser ajustados por `PDFTOTEXT_BIN`, `PDFTOPPM_BIN`, `TESSERACT_BIN`, `OCR_ENABLED`, `OCR_LANG` e `OCR_DPI`. Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Valide com `php -l public/index.php` antes de publicar.
 
 ## Fila administrativa
 

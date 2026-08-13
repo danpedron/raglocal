@@ -256,7 +256,7 @@ function ollama_models(): array
 function document_kind_label(string $kind): string
 {
     return match ($kind) {
-        'estatuto' => 'Estatuto',
+        'regimento' => 'Regimento interno',
         'ata' => 'Ata',
         'memoria' => 'Memória validada',
         'manutencao' => 'Manutenção',
@@ -560,9 +560,9 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo->beginTransaction();
             try {
                 $stmt = $pdo->prepare('INSERT INTO documents(title, kind, source_filename, status, created_by) VALUES(?, ?, ?, ?, ?)');
-                $kind = (string) ($_POST['kind'] ?? 'estatuto');
-                if (!in_array($kind, ['estatuto', 'ata', 'memoria', 'manutencao'], true)) {
-                    $kind = 'estatuto';
+                $kind = (string) ($_POST['kind'] ?? 'regimento');
+                if (!in_array($kind, ['regimento', 'ata', 'memoria', 'manutencao'], true)) {
+                    $kind = 'regimento';
                 }
                 $title = trim((string) ($_POST['title'] ?? '')) ?: pathinfo((string) $file['name'], PATHINFO_FILENAME);
                 $stmt->execute([$title, $kind, (string) $file['name'], 'processing', $_SESSION['user']['id']]);
@@ -623,7 +623,7 @@ if ($route === 'admin') {
     $minConfidence = rag_min_confidence();
     $minSources = rag_min_sources();
     $timeout = ollama_timeout();
-    $body = '<div class="card"><p><a href="?">Voltar ao atendimento</a> · <a href="?route=logout">Sair</a></p><h2>Base de conhecimento</h2>' . (!empty($flash = take_flash()) ? '<p>' . h($flash) . '</p>' : '') . '<form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '">Título<input name="title" required>Tipo<select name="kind"><option value="estatuto">Estatuto</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required><button>Enviar e indexar</button></form></div>';
+    $body = '<div class="card"><p><a href="?">Voltar ao atendimento</a> · <a href="?route=logout">Sair</a></p><h2>Base de conhecimento</h2>' . (!empty($flash = take_flash()) ? '<p>' . h($flash) . '</p>' : '') . '<form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '">Título<input name="title" required>Tipo<select name="kind"><option value="regimento">Regimento interno</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required><button>Enviar e indexar</button></form></div>';
     $body .= '<div class="card"><h2>Confiabilidade e Ollama</h2><p class="muted">Endpoint: ' . h(envv('OLLAMA_URL', 'não configurado')) . '. A resposta só é publicada quando o modelo indica evidência suficiente, cita fontes válidas e supera o limiar abaixo. Caso contrário, o morador vê apenas o encaminhamento humano.</p><form action="?route=settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Modelo de chat<select name="chat_model">';
     foreach ($models as $model => $description) {
         $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
@@ -674,7 +674,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $publicAnswer = $result['answer'];
         $status = 'answered';
     } else {
-        $publicAnswer = 'Não encontrei base suficiente no estatuto, nas atas ou nas respostas validadas. Sua dúvida foi encaminhada a um atendente humano.';
+        $publicAnswer = 'Não encontrei base suficiente no regimento interno, nas atas ou nas respostas validadas. Sua dúvida foi encaminhada a um atendente humano.';
         $status = 'human_pending';
     }
     $pdo->prepare('UPDATE conversations SET status = ?, ai_draft = ?, ai_confidence = ?, ai_model = ? WHERE id = ?')->execute([$status, $reference !== '' ? $reference : null, $result['confidence'], $result['model'], $conversationId]);
@@ -700,4 +700,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     layout('Resposta', $body);
 }
 
-layout('Atendimento', '<div class="card"><p>Consulte o estatuto e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.</p><form method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Pergunta<textarea name="question" rows="5" placeholder="Digite sua dúvida..." required></textarea><button>Consultar</button></form></div><p class="muted"><a href="?route=login">Acesso administrativo</a></p>');
+layout('Atendimento', '<div class="card"><p>Consulte o regimento interno e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.</p><form method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Pergunta<textarea name="question" rows="5" placeholder="Digite sua dúvida..." required></textarea><button>Consultar</button></form></div><p class="muted"><a href="?route=login">Acesso administrativo</a></p>');
