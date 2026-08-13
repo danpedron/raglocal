@@ -909,10 +909,12 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!move_uploaded_file($file['tmp_name'], $storedOriginalPath)) {
                     throw new RuntimeException('Falha ao armazenar o arquivo original.');
                 }
+                @chmod($storedOriginalPath, 0660);
                 $markdownBytes = file_put_contents($storedMarkdownPath, $rag['markdown'], LOCK_EX);
                 if ($markdownBytes === false || $markdownBytes !== strlen($rag['markdown'])) {
                     throw new RuntimeException('Falha ao armazenar o Markdown RAG.');
                 }
+                @chmod($storedMarkdownPath, 0660);
                 $artifactStmt = $pdo->prepare('INSERT INTO document_artifacts(document_id, artifact_type, filename, storage_path, mime_type, byte_size, sha256, content) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
                 $artifactStmt->execute([$documentId, 'original', (string) $file['name'], 'storage/uploads/' . $originalFilename, artifact_mime($storedOriginalPath, 'application/octet-stream'), (int) filesize($storedOriginalPath), $sourceSha256, null]);
                 $artifactStmt->execute([$documentId, 'markdown', $markdownFilename, 'storage/uploads/' . $markdownFilename, 'text/markdown; charset=UTF-8', $markdownBytes, $rag['canonical_sha256'], $rag['markdown']]);
