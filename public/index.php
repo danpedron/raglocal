@@ -400,8 +400,46 @@ function ollama_call(string $question, array $sources): array
     ];
 }
 
+function normalize_memory_question(string $value): string
+{
+    $value = mb_strtolower(trim($value), 'UTF-8');
+    $value = preg_replace('/[^\\p{L}\\p{N}]+/u', ' ', $value) ?? '';
+    return trim(preg_replace('/\\s+/u', ' ', $value) ?? '');
+}
+
+function validated_memory_context(string $question): array
+{
+    $normalizedQuestion = normalize_memory_question($question);
+    if ($normalizedQuestion === '') {
+        return [];
+    }
+
+    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
+        FROM chunks c JOIN documents d ON d.id = c.document_id
+        WHERE d.status = 'ready' AND d.kind = 'memoria'
+        ORDER BY score DESC, c.id DESC LIMIT 100");
+    $stmt->execute(['q' => $question]);
+
+    foreach ($stmt->fetchAll() as $row) {
+        if (!preg_match('/^Pergunta:\\s*(.*?)\\s+Resposta validada:/us', (string) $row['content'], $match)) {
+            continue;
+        }
+        if (normalize_memory_question((string) $match[1]) === $normalizedQuestion) {
+            $row['score'] = 100000.0;
+            return [$row];
+        }
+    }
+
+    return [];
+}
+
 function context(string $question): array
 {
+    $validatedMemory = validated_memory_context($question);
+    if ($validatedMemory) {
+        return $validatedMemory;
+    }
+
     $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
         FROM chunks c JOIN documents d ON d.id = c.document_id
         WHERE d.status = 'ready' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)

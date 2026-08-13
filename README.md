@@ -4,7 +4,7 @@ Aplicação PHP de RAG para responder dúvidas sobre regimento interno, atas, do
 
 ## Princípios de segurança
 
-A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência.
+A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência. Respostas humanas validadas têm prioridade quando a nova pergunta corresponde exatamente à pergunta ensinada, após normalização segura de caixa, acentos, pontuação e espaços.
 
 Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas são registradas na tabela `audit_logs`, junto com o IP de origem, porta de origem quando fornecida pelo proxy, User-Agent, método, URI, host, referenciador, cabeçalho `X-Forwarded-For` e um hash de sessão. Os dados de auditoria não são exibidos na interface pública. A migração de backfill cobre mensagens anteriores, mas marca que os metadados de origem não estavam disponíveis antes da instrumentação.
 
