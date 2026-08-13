@@ -13,6 +13,9 @@ CREATE TABLE documents (
   kind ENUM('regimento','ata','memoria','manutencao') NOT NULL,
   source_filename VARCHAR(255) NULL,
   status ENUM('processing','ready','error') NOT NULL DEFAULT 'processing',
+  parser_version VARCHAR(40) NULL,
+  canonical_sha256 CHAR(64) NULL,
+  processed_at TIMESTAMP NULL,
   created_by BIGINT UNSIGNED NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
@@ -22,11 +25,32 @@ CREATE TABLE chunks (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   document_id BIGINT UNSIGNED NOT NULL,
   chunk_no INT UNSIGNED NOT NULL,
+  section_heading VARCHAR(255) NULL,
+  tags VARCHAR(1000) NULL,
+  page_start SMALLINT UNSIGNED NULL,
+  page_end SMALLINT UNSIGNED NULL,
+  token_count INT UNSIGNED NULL,
   content MEDIUMTEXT NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FULLTEXT KEY ft_chunks_content (content),
   FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
   UNIQUE KEY uq_document_chunk (document_id, chunk_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE document_artifacts (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  document_id BIGINT UNSIGNED NOT NULL,
+  artifact_type ENUM('original','markdown') NOT NULL,
+  filename VARCHAR(255) NOT NULL,
+  storage_path VARCHAR(500) NOT NULL,
+  mime_type VARCHAR(120) NOT NULL,
+  byte_size INT UNSIGNED NOT NULL,
+  sha256 CHAR(64) NOT NULL,
+  content LONGTEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_document_artifact_type (document_id, artifact_type),
+  KEY idx_artifacts_sha256 (sha256)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE conversations (

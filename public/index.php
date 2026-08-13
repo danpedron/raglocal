@@ -294,19 +294,18 @@ function ollama_timeout(): int
 
 function ollama_call(string $question, array $sources): array
 {
-    if (!empty($sources[0]['memory_validated'])) {
-        if (preg_match('/^Pergunta:\\s*.*?\\s+Resposta validada:\\s*(.*)$/us', (string) $sources[0]['content'], $match)) {
-            $validatedAnswer = trim((string) $match[1]);
-            if ($validatedAnswer !== '') {
-                return [
-                    'approved' => true,
-                    'answer' => $validatedAnswer,
-                    'confidence' => 1.0,
-                    'source_numbers' => [1],
-                    'model' => 'memoria-validada',
-                    'error' => '',
-                ];
-            }
+    if (!empty($sources[0]['memory_exact'])) {
+        $memory = parse_validated_memory((string) $sources[0]['content']);
+        $validatedAnswer = trim((string) ($memory['answer'] ?? ''));
+        if ($validatedAnswer !== '') {
+            return [
+                'approved' => true,
+                'answer' => $validatedAnswer,
+                'confidence' => 1.0,
+                'source_numbers' => [1],
+                'model' => 'memoria-validada',
+                'error' => '',
+            ];
         }
     }
 
@@ -329,7 +328,7 @@ function ollama_call(string $question, array $sources): array
     $context = implode("\n\n", $contextParts);
     $model = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
     $prompt = "Você é o assistente oficial do Condomínio Jaraguá Tower.\n\n" .
-        "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. " .
+        "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. Memórias marcadas como [RAG_MEMORIA_VALIDADA] são respostas humanas aprovadas e podem ser usadas como evidência quando a pergunta atual tiver a mesma intenção, mesmo que esteja formulada com outras palavras. Nesse caso, adapte a redação apenas o necessário e preserve o conteúdo da resposta validada; não acrescente conhecimento geral. " .
         "Se alguma fonte sustentar diretamente a resposta, responda em 1 a 3 frases completas, copiando ou resumindo somente os fatos dessa fonte; inclua o fato principal e a informação complementar mais relevante que esteja na mesma fonte, como serviço realizado, data ou validade. Se a pergunta pedir quando, informe a data e explique a que serviço ou evento ela se refere. Nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
         "Se nenhuma fonte sustentar diretamente a resposta, grounded deve ser false, confidence deve ser 0, source_numbers deve ser [] e answer deve dizer que não encontrou base suficiente. " .
         "Nunca use conhecimento geral, não complete lacunas, não faça suposições e não invente horários, multas, artigos, datas, decisões ou interpretações. " .
@@ -423,6 +422,16 @@ function normalize_memory_question(string $value): string
     return trim(preg_replace('/\\s+/u', ' ', $value) ?? '');
 }
 
+function parse_validated_memory(string $content): ?array
+{
+    if (!preg_match('/Pergunta:\\s*(.*?)\\s+Resposta validada:\\s*(.*)$/us', $content, $match)) {
+        return null;
+    }
+    $question = trim((string) $match[1]);
+    $answer = trim((string) $match[2]);
+    return $question !== '' && $answer !== '' ? ['question' => $question, 'answer' => $answer] : null;
+}
+
 function memory_question_terms(string $value): array
 {
     $normalized = normalize_memory_question($value);
@@ -488,14 +497,15 @@ function validated_memory_context(string $question): array
     $similar = [];
 
     foreach ($stmt->fetchAll() as $row) {
-        if (!preg_match('/^Pergunta:\\s*(.*?)\\s+Resposta validada:/us', (string) $row['content'], $match)) {
+        $memory = parse_validated_memory((string) $row['content']);
+        if (!$memory) {
             continue;
         }
-        $storedQuestion = (string) $match[1];
+        $storedQuestion = (string) $memory['question'];
+        $row['content'] = '[RAG_MEMORIA_VALIDADA] [FONTE] Respostas validadas por atendentes [TAGS] memoria validada atendente\n' . trim((string) $row['content']);
         if (normalize_memory_question($storedQuestion) === $normalizedQuestion) {
             $row['score'] = 100000.0;
             $row['memory_exact'] = true;
-            $row['memory_validated'] = true;
             return [$row];
         }
 
@@ -503,6 +513,7 @@ function validated_memory_context(string $question): array
         if ($score >= 0.90) {
             $row['score'] = $score;
             $row['memory_similarity'] = $score;
+            $row['memory_similar'] = true;
             $similar[] = $row;
         }
     }
@@ -514,13 +525,12 @@ function validated_memory_context(string $question): array
     $best = $similar[0];
     $second = $similar[1] ?? null;
     if ($second && ((float) $best['score'] - (float) $second['score']) < 0.05) {
-        preg_match('/Resposta validada:\\s*(.*)$/us', (string) $best['content'], $bestAnswer);
-        preg_match('/Resposta validada:\\s*(.*)$/us', (string) $second['content'], $secondAnswer);
-        if (normalize_memory_question((string) ($bestAnswer[1] ?? '')) !== normalize_memory_question((string) ($secondAnswer[1] ?? ''))) {
+        $bestAnswer = parse_validated_memory((string) $best['content']);
+        $secondAnswer = parse_validated_memory((string) $second['content']);
+        if (normalize_memory_question((string) ($bestAnswer['answer'] ?? '')) !== normalize_memory_question((string) ($secondAnswer['answer'] ?? ''))) {
             return [];
         }
     }
-    $best['memory_validated'] = true;
     return [$best];
 }
 
@@ -603,22 +613,199 @@ function extract_text(string $file, string $name): string
     return is_string($text) ? $text : '';
 }
 
-function split_text(string $text, int $size = 1800): array
+function normalize_document_text(string $text): string
 {
-    $text = preg_replace('/\s+/u', ' ', trim($text)) ?? '';
-    $chunks = [];
-    while (mb_strlen($text) > 0) {
-        $cut = min($size, mb_strlen($text));
-        if ($cut < $size) {
-            $position = mb_strrpos(mb_substr($text, 0, $cut), ' ');
-            if ($position !== false && $position > 600) {
-                $cut = $position;
+    $text = str_replace(["\r\n", "\r"], "\n", $text);
+    $text = str_replace("\f", "\n\n[[PAGE_BREAK]]\n\n", $text);
+    $text = preg_replace('/[\\x00-\\x08\\x0B\\x0E-\\x1F\\x7F]/u', ' ', $text) ?? $text;
+    $text = preg_replace('/[ \\t]+/u', ' ', $text) ?? $text;
+    $text = preg_replace('/\\n{3,}/u', "\n\n", $text) ?? $text;
+    return trim($text);
+}
+
+function rag_heading(string $line): ?string
+{
+    $line = trim($line);
+    if ($line === '' || mb_strlen($line, 'UTF-8') > 180) {
+        return null;
+    }
+    if (preg_match('/^#{1,6}\\s+(.+)$/u', $line, $match)) {
+        return trim((string) $match[1]);
+    }
+    if (preg_match('/^(?:CAP[IÍ]TULO|SE[CÇÃ]O|ART(?:IGO)?\\.?|ANEXO)\\b.*$/iu', $line)) {
+        return $line;
+    }
+    $letters = preg_replace('/[^\\p{L}]+/u', '', $line) ?? '';
+    if ($letters !== '' && mb_strtoupper($letters, 'UTF-8') === $letters && mb_strlen($letters, 'UTF-8') >= 5) {
+        return $line;
+    }
+    return null;
+}
+
+function rag_tags(string $title, string $kind, string $heading): string
+{
+    $parts = [$title, document_kind_label($kind), 'condominio', 'jaragua tower', $heading];
+    $tags = [];
+    foreach ($parts as $part) {
+        $words = preg_split('/[^\\p{L}\\p{N}]+/u', mb_strtolower($part, 'UTF-8')) ?: [];
+        foreach ($words as $word) {
+            if (mb_strlen($word, 'UTF-8') >= 3) {
+                $tags[$word] = true;
             }
         }
-        $chunks[] = trim(mb_substr($text, 0, $cut));
-        $text = trim(mb_substr($text, $cut));
     }
-    return array_values(array_filter($chunks));
+    return implode(' ', array_keys($tags));
+}
+
+function rag_sections(string $text): array
+{
+    $sections = [];
+    $heading = 'Conteúdo principal';
+    $page = 1;
+    $body = [];
+    $flush = static function () use (&$sections, &$body, &$heading, &$page): void {
+        $content = trim(implode("\n", $body));
+        if ($content !== '') {
+            $sections[] = ['heading' => $heading, 'body' => $content, 'page_start' => $page, 'page_end' => $page];
+        }
+        $body = [];
+    };
+
+    foreach (preg_split('/\\n{2,}/u', $text) ?: [] as $paragraph) {
+        $paragraph = trim($paragraph);
+        if ($paragraph === '') {
+            continue;
+        }
+        if ($paragraph === '[[PAGE_BREAK]]') {
+            $flush();
+            $page++;
+            continue;
+        }
+        $lines = preg_split('/\\n/u', $paragraph) ?: [];
+        $first = trim((string) ($lines[0] ?? ''));
+        $detectedHeading = rag_heading($first);
+        if ($detectedHeading !== null) {
+            $flush();
+            $heading = $detectedHeading;
+            $remaining = trim(implode("\n", array_slice($lines, 1)));
+            if ($remaining !== '') {
+                $body[] = $remaining;
+            }
+        } else {
+            $body[] = $paragraph;
+        }
+    }
+    $flush();
+    return $sections ?: [['heading' => 'Conteúdo principal', 'body' => $text, 'page_start' => 1, 'page_end' => $page]];
+}
+
+function split_rag_body(string $body, int $size = 1800): array
+{
+    $paragraphs = preg_split('/\\n{2,}/u', trim($body)) ?: [];
+    $chunks = [];
+    $current = '';
+    foreach ($paragraphs as $paragraph) {
+        $paragraph = trim(preg_replace('/\\s+/u', ' ', $paragraph) ?? '');
+        if ($paragraph === '') {
+            continue;
+        }
+        while (mb_strlen($paragraph, 'UTF-8') > $size) {
+            if ($current !== '') {
+                $chunks[] = $current;
+                $current = '';
+            }
+            $piece = mb_substr($paragraph, 0, $size, 'UTF-8');
+            $position = mb_strrpos($piece, ' ', 0, 'UTF-8');
+            if ($position !== false && $position > 600) {
+                $piece = mb_substr($piece, 0, $position, 'UTF-8');
+            }
+            $chunks[] = trim($piece);
+            $paragraph = trim(mb_substr($paragraph, mb_strlen($piece, 'UTF-8'), null, 'UTF-8'));
+        }
+        if ($current !== '' && mb_strlen($current . ' ' . $paragraph, 'UTF-8') > $size) {
+            $chunks[] = $current;
+            $current = '';
+        }
+        $current = $current === '' ? $paragraph : $current . "\n\n" . $paragraph;
+    }
+    if ($current !== '') {
+        $chunks[] = $current;
+    }
+    return array_values(array_filter($chunks, static fn (string $chunk): bool => trim($chunk) !== ''));
+}
+
+function build_rag_document(string $title, string $kind, string $sourceFilename, string $text): array
+{
+    $normalized = normalize_document_text($text);
+    $sourceSha256 = hash('sha256', $normalized);
+    $sections = rag_sections($normalized);
+    $parserVersion = 'jaragua-rag-v1';
+    $markdown = [
+        '---',
+        'rag_format: ' . $parserVersion,
+        'language: pt-BR',
+        'title: ' . json_encode($title, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        'kind: ' . $kind,
+        'source_filename: ' . json_encode($sourceFilename, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        'source_sha256: ' . $sourceSha256,
+        'canonical_sha256: PENDING',
+        '---',
+        '',
+        '# [DOCUMENTO] ' . $title,
+        '',
+        '[TAGS] ' . rag_tags($title, $kind, 'documento'),
+        '',
+    ];
+    $chunks = [];
+    foreach ($sections as $section) {
+        $heading = trim((string) $section['heading']);
+        $tags = rag_tags($title, $kind, $heading);
+        $markdown[] = '## [SEÇÃO] ' . $heading;
+        $markdown[] = '[TAGS] ' . $tags;
+        $markdown[] = '';
+        $markdown[] = trim((string) $section['body']);
+        $markdown[] = '';
+        foreach (split_rag_body((string) $section['body']) as $chunkBody) {
+            $chunks[] = [
+                'content' => '[RAG_DOCUMENTO] [FONTE] ' . $title . ' [TIPO] ' . document_kind_label($kind) . ' [SEÇÃO] ' . $heading . ' [TAGS] ' . $tags . "\n" . $chunkBody,
+                'section_heading' => mb_substr($heading, 0, 255, 'UTF-8'),
+                'tags' => mb_substr($tags, 0, 1000, 'UTF-8'),
+                'page_start' => (int) $section['page_start'],
+                'page_end' => (int) $section['page_end'],
+                'token_count' => count(preg_split('/\\s+/u', $chunkBody, -1, PREG_SPLIT_NO_EMPTY) ?: []),
+            ];
+        }
+    }
+    $canonicalWithoutHash = implode("\n", $markdown) . "\n";
+    $canonicalSha256 = hash('sha256', $canonicalWithoutHash);
+    $markdown[7] = 'canonical_sha256: ' . $canonicalSha256;
+    return [
+        'markdown' => implode("\n", $markdown) . "\n",
+        'chunks' => $chunks,
+        'source_sha256' => $sourceSha256,
+        'canonical_sha256' => $canonicalSha256,
+        'parser_version' => $parserVersion,
+    ];
+}
+
+function rag_storage_dir(): string
+{
+    return rtrim(envv('RAG_UPLOAD_DIR', dirname(__DIR__) . '/storage/uploads'), '/');
+}
+
+function ensure_rag_storage(): bool
+{
+    $directory = rag_storage_dir();
+    if (!is_dir($directory) && !mkdir($directory, 0770, true) && !is_dir($directory)) {
+        return false;
+    }
+    return is_writable($directory);
+}
+
+function artifact_mime(string $path, string $fallback): string
+{
+    $mime = function_exists('mime_content_type') ? mime_content_type($path) : false;
+    return is_string($mime) && $mime !== '' ? $mime : $fallback;
 }
 
 function layout(string $title, string $body): never
@@ -684,39 +871,69 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $file = $_FILES['document'] ?? null;
     $maximumBytes = 10 * 1024 * 1024;
+    $storedOriginalPath = null;
+    $storedMarkdownPath = null;
     if (!$file || $file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name']) || (int) $file['size'] > $maximumBytes) {
         flash('Falha no upload. O limite é 10 MB.');
     } else {
         $allowed = ['pdf', 'txt', 'md'];
         $extension = strtolower(pathinfo((string) $file['name'], PATHINFO_EXTENSION));
+        $kind = (string) ($_POST['kind'] ?? 'regimento');
+        if (!in_array($kind, ['regimento', 'ata', 'memoria', 'manutencao'], true)) {
+            $kind = 'regimento';
+        }
+        $title = trim((string) ($_POST['title'] ?? '')) ?: pathinfo((string) $file['name'], PATHINFO_FILENAME);
         $text = in_array($extension, $allowed, true) ? extract_text($file['tmp_name'], (string) $file['name']) : '';
         if (!in_array($extension, $allowed, true)) {
             flash('Aceitos apenas arquivos PDF, TXT e MD.');
         } elseif (trim($text) === '') {
             flash('Não foi possível extrair texto desse arquivo.');
+        } elseif (!ensure_rag_storage()) {
+            flash('Não foi possível gravar no armazenamento privado de documentos.');
         } else {
+            $rag = build_rag_document($title, $kind, (string) $file['name'], $text);
+            $sourceSha256 = hash_file('sha256', $file['tmp_name']) ?: '';
             $pdo = db();
             $pdo->beginTransaction();
             try {
-                $stmt = $pdo->prepare('INSERT INTO documents(title, kind, source_filename, status, created_by) VALUES(?, ?, ?, ?, ?)');
-                $kind = (string) ($_POST['kind'] ?? 'regimento');
-                if (!in_array($kind, ['regimento', 'ata', 'memoria', 'manutencao'], true)) {
-                    $kind = 'regimento';
-                }
-                $title = trim((string) ($_POST['title'] ?? '')) ?: pathinfo((string) $file['name'], PATHINFO_FILENAME);
-                $stmt->execute([$title, $kind, (string) $file['name'], 'processing', $_SESSION['user']['id']]);
+                $stmt = $pdo->prepare('INSERT INTO documents(title, kind, source_filename, status, parser_version, canonical_sha256, created_by) VALUES(?, ?, ?, ?, ?, ?, ?)');
+                $stmt->execute([$title, $kind, (string) $file['name'], 'processing', $rag['parser_version'], $rag['canonical_sha256'], $_SESSION['user']['id']]);
                 $documentId = (int) $pdo->lastInsertId();
-                $insertChunk = $pdo->prepare('INSERT INTO chunks(document_id, chunk_no, content) VALUES(?, ?, ?)');
-                foreach (split_text($text) as $number => $chunk) {
-                    $insertChunk->execute([$documentId, $number + 1, $chunk]);
+                $storageDir = rag_storage_dir();
+                $originalFilename = 'document-' . $documentId . '.source.' . $extension;
+                $markdownFilename = 'document-' . $documentId . '.rag.md';
+                $storedOriginalPath = $storageDir . '/' . $originalFilename;
+                $storedMarkdownPath = $storageDir . '/' . $markdownFilename;
+                if (!move_uploaded_file($file['tmp_name'], $storedOriginalPath)) {
+                    throw new RuntimeException('Falha ao armazenar o arquivo original.');
                 }
-                $pdo->prepare("UPDATE documents SET status = 'ready' WHERE id = ?")->execute([$documentId]);
+                $markdownBytes = file_put_contents($storedMarkdownPath, $rag['markdown'], LOCK_EX);
+                if ($markdownBytes === false || $markdownBytes !== strlen($rag['markdown'])) {
+                    throw new RuntimeException('Falha ao armazenar o Markdown RAG.');
+                }
+                $artifactStmt = $pdo->prepare('INSERT INTO document_artifacts(document_id, artifact_type, filename, storage_path, mime_type, byte_size, sha256, content) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
+                $artifactStmt->execute([$documentId, 'original', (string) $file['name'], 'storage/uploads/' . $originalFilename, artifact_mime($storedOriginalPath, 'application/octet-stream'), (int) filesize($storedOriginalPath), $sourceSha256, null]);
+                $artifactStmt->execute([$documentId, 'markdown', $markdownFilename, 'storage/uploads/' . $markdownFilename, 'text/markdown; charset=UTF-8', $markdownBytes, $rag['canonical_sha256'], $rag['markdown']]);
+                $insertChunk = $pdo->prepare('INSERT INTO chunks(document_id, chunk_no, content, section_heading, tags, page_start, page_end, token_count) VALUES(?, ?, ?, ?, ?, ?, ?, ?)');
+                foreach ($rag['chunks'] as $number => $chunk) {
+                    $insertChunk->execute([$documentId, $number + 1, $chunk['content'], $chunk['section_heading'], $chunk['tags'], $chunk['page_start'], $chunk['page_end'], $chunk['token_count']]);
+                }
+                if (!$rag['chunks']) {
+                    throw new RuntimeException('O documento não gerou trechos recuperáveis.');
+                }
+                $pdo->prepare("UPDATE documents SET status = 'ready', processed_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$documentId]);
                 $pdo->commit();
-                audit_event('document_upload', 'admin', ['metadata' => ['document_id' => $documentId, 'kind' => $kind, 'extension' => $extension, 'bytes' => (int) $file['size'], 'chunk_count' => count(split_text($text))]]);
-                flash('Documento indexado com sucesso.');
+                audit_event('document_upload', 'admin', ['metadata' => ['document_id' => $documentId, 'kind' => $kind, 'extension' => $extension, 'bytes' => (int) $file['size'], 'chunk_count' => count($rag['chunks']), 'parser_version' => $rag['parser_version'], 'source_sha256' => $sourceSha256, 'canonical_sha256' => $rag['canonical_sha256'], 'markdown_bytes' => $markdownBytes]]);
+                flash('Documento convertido para Markdown RAG e indexado com sucesso.');
             } catch (Throwable $error) {
                 $pdo->rollBack();
-                flash('Não foi possível indexar o documento.');
+                if ($storedOriginalPath !== null) {
+                    @unlink($storedOriginalPath);
+                }
+                if ($storedMarkdownPath !== null) {
+                    @unlink($storedMarkdownPath);
+                }
+                flash('Não foi possível converter e indexar o documento.');
             }
         }
     }
@@ -746,7 +963,8 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
             $document = ['id' => $pdo->lastInsertId()];
         }
         $next = (int) $pdo->query('SELECT COALESCE(MAX(chunk_no), 0) + 1 FROM chunks WHERE document_id = ' . (int) $document['id'])->fetchColumn();
-        $pdo->prepare('INSERT INTO chunks(document_id, chunk_no, content) VALUES(?, ?, ?)')->execute([(int) $document['id'], $next, 'Pergunta: ' . $question['body'] . ' Resposta validada: ' . $answer]);
+        $memoryContent = '[RAG_MEMORIA_VALIDADA] [FONTE] Respostas validadas por atendentes [TAGS] memoria validada atendente\nPergunta: ' . $question['body'] . ' Resposta validada: ' . $answer;
+        $pdo->prepare('INSERT INTO chunks(document_id, chunk_no, content, section_heading, tags, token_count) VALUES(?, ?, ?, ?, ?, ?)')->execute([(int) $document['id'], $next, $memoryContent, 'Resposta humana validada', 'memoria validada atendente', count(preg_split('/\\s+/u', $memoryContent, -1, PREG_SPLIT_NO_EMPTY) ?: [])]);
         flash('Resposta registrada e incorporada à memória validada.');
     }
     header('Location: ?route=admin');
