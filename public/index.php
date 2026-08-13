@@ -790,7 +790,9 @@ function build_rag_document(string $title, string $kind, string $sourceFilename,
 
 function rag_storage_dir(): string
 {
-    return rtrim(envv('RAG_UPLOAD_DIR', dirname(__DIR__) . '/storage/uploads'), '/');
+    $default = dirname(__DIR__) . '/storage/uploads';
+    $configured = trim(envv('RAG_UPLOAD_DIR'));
+    return rtrim($configured !== '' ? $configured : $default, '/');
 }
 
 function ensure_rag_storage(): bool
