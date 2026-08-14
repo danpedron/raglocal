@@ -27,6 +27,7 @@ load_env(dirname(__DIR__) . '/config/.env');
 require_once dirname(__DIR__) . '/src/SecretBox.php';
 require_once dirname(__DIR__) . '/src/OllamaResponse.php';
 require_once dirname(__DIR__) . '/src/RagSearchTerms.php';
+require_once dirname(__DIR__) . '/src/RagGlossary.php';
 require_once dirname(__DIR__) . '/src/AiGuidance.php';
 require_once dirname(__DIR__) . '/src/SourceRegistry.php';
 require_once dirname(__DIR__) . '/src/DatabaseTablePlugin.php';
@@ -734,12 +735,17 @@ function context(string $question): array
     }
 
     $prefixQuery = RagSearchTerms::booleanPrefixQuery($question);
+    $semanticTerms = RagGlossary::expansionTerms(db(), $question);
+    $semanticQuery = $semanticTerms ? implode(' ', $semanticTerms) : '__raglocal_glossary_no_match__';
+    $semanticPrefixQuery = $semanticTerms ? implode(' ', array_map(static fn (string $term): string => $term . '*', $semanticTerms)) : '__raglocal_glossary_no_match__';
     $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind,
             dsl.public_url,
             NULL AS published_at,
             NULL AS service_department,
             MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score,
-            MATCH(c.content) AGAINST(:prefix_score IN BOOLEAN MODE) AS prefix_score
+            MATCH(c.content) AGAINST(:prefix_score IN BOOLEAN MODE) AS prefix_score,
+            MATCH(c.content) AGAINST(:semantic_score IN NATURAL LANGUAGE MODE) AS semantic_score,
+            MATCH(c.content) AGAINST(:semantic_prefix_score IN BOOLEAN MODE) AS semantic_prefix_score
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
         LEFT JOIN document_source_links dsl ON dsl.document_id = d.id AND dsl.is_active = 1
@@ -749,14 +755,20 @@ function context(string $question): array
           AND (
               MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0
               OR MATCH(c.content) AGAINST(:prefix_filter IN BOOLEAN MODE) > 0
+              OR MATCH(c.content) AGAINST(:semantic_filter IN NATURAL LANGUAGE MODE) > 0
+              OR MATCH(c.content) AGAINST(:semantic_prefix_filter IN BOOLEAN MODE) > 0
               OR c.content LIKE :like
           )
-        ORDER BY GREATEST(score, prefix_score) DESC, c.id DESC LIMIT 6");
+        ORDER BY GREATEST(score, prefix_score, semantic_score * 0.45, semantic_prefix_score * 0.40) DESC, c.id DESC LIMIT 6");
     $stmt->execute([
         'q' => $question,
         'prefix_score' => $prefixQuery,
+        'semantic_score' => $semanticQuery,
+        'semantic_prefix_score' => $semanticPrefixQuery,
         'q2' => $question,
         'prefix_filter' => $prefixQuery,
+        'semantic_filter' => $semanticQuery,
+        'semantic_prefix_filter' => $semanticPrefixQuery,
         'like' => '%' . mb_substr($question, 0, 100) . '%',
     ]);
     return $stmt->fetchAll();
@@ -1566,7 +1578,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'sources', 'security'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'glossary', 'settings', 'sources', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1589,6 +1601,9 @@ if ($route === 'admin') {
     $currentLogo = brand_logo_filename();
     $defaultScopeResponse = default_scope_template();
     $currentGuidance = AiGuidance::fromSettings($pdo);
+    $glossaryStats = RagGlossary::stats($pdo);
+    $glossaryTopTerms = $section === 'glossary' ? RagGlossary::topTerms($pdo) : [];
+    $glossaryTopRelations = $section === 'glossary' ? RagGlossary::topRelations($pdo) : [];
     $sourceRows = SourceRegistry::all($pdo);
     $sourceEdit = null;
     $sourceEditConfig = [];
@@ -1605,7 +1620,7 @@ if ($route === 'admin') {
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('sources', 'Fontes de conhecimento', count($sourceRows) > 0 ? (string) count($sourceRows) : '') . $menuLink('security', 'Segurança') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('glossary', 'Glossário local', $glossaryStats['term_count'] > 0 ? (string) $glossaryStats['term_count'] : '') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('sources', 'Fontes de conhecimento', count($sourceRows) > 0 ? (string) count($sourceRows) : '') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1616,7 +1631,7 @@ if ($route === 'admin') {
         } else {
             $body .= '<div class="success-alert">Nenhuma pergunta aguarda intervenção humana no momento.</div>';
         }
-        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div><div class="card"><h3>Fontes de conhecimento</h3><p class="muted">Ative plugins configuráveis para importar bancos, arquivos e outros repositórios externos. Nenhum conector é obrigatório.</p><a href="?route=admin&amp;section=sources">Gerenciar fontes</a></div></div>';
+        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Glossário local</h3><p class="muted">Acompanha termos e relações recorrentes das perguntas para ampliar a recuperação, sem criar fatos nem substituir as regras de siglas.</p><a href="?route=admin&amp;section=glossary">Ver glossário</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div><div class="card"><h3>Fontes de conhecimento</h3><p class="muted">Ative plugins configuráveis para importar bancos, arquivos e outros repositórios externos. Nenhum conector é obrigatório.</p><a href="?route=admin&amp;section=sources">Gerenciar fontes</a></div></div>';
     } elseif ($section === 'pending') {
         $body .= '<div class="card"><div class="eyebrow">AÇÃO PRIORITÁRIA</div><h3>Intervenção humana necessária</h3><p class="section-intro muted">Responda cada pergunta abaixo para concluir o atendimento. A resposta aprovada será incorporada à memória validada do RAGLocal.</p>';
         if ($pendingCount > 0) {
@@ -1655,6 +1670,23 @@ if ($route === 'admin') {
         $body .= '</tbody></table></div>';
     } elseif ($section === 'branding') {
         $body .= '<div class="card"><h3>Identidade da empresa</h3><p class="muted">Esses dados aparecem no cabeçalho da página pública e do painel.</p><form action="?route=settings" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="chat_model" value="' . h($selectedModel) . '"><input type="hidden" name="min_confidence" value="' . h(number_format($minConfidence, 2, '.', '')) . '"><input type="hidden" name="min_sources" value="' . h((string) $minSources) . '"><input type="hidden" name="timeout" value="' . h((string) $timeout) . '"><label>Nome exibido<input name="brand_name" maxlength="120" value="' . h($currentBrandName) . '" required></label><label>Descrição curta<input name="brand_subtitle" maxlength="240" value="' . h($currentBrandSubtitle) . '"></label><label>Logotipo<input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif"></label><span class="muted">PNG, JPG, WEBP ou GIF, até 2 MB. ' . ($currentLogo !== '' ? 'Logotipo atual: ' . h($currentLogo) . '.' : 'Nenhum logotipo configurado.') . '</span><label><input type="checkbox" name="remove_logo" value="1"> Remover logotipo atual</label><br><button>Salvar identidade</button></form></div>';
+    } elseif ($section === 'glossary') {
+        $body .= '<div class="card"><div class="eyebrow">ÍNDICE LOCAL AUXILIAR</div><h3>Glossário de uso do atendimento</h3><p class="muted">O glossário aprende somente termos relevantes e coocorrências observadas nas perguntas. Ele amplia a busca por documentos, com peso inferior à correspondência direta. Não é fonte de fatos, não altera respostas validadas e não substitui as regras interpretativas de siglas, que permanecem em Diretrizes da IA.</p><div class="admin-stats"><div class="admin-stat"><span class="muted">Termos observados</span><strong>' . (int) $glossaryStats['term_count'] . '</strong></div><div class="admin-stat"><span class="muted">Relações observadas</span><strong>' . (int) $glossaryStats['relation_count'] . '</strong></div><div class="admin-stat"><span class="muted">Ocorrências indexadas</span><strong>' . (int) $glossaryStats['learned_question_count'] . '</strong></div></div></div>';
+        $body .= '<div class="grid"><div class="card"><h3>Termos mais recorrentes</h3><table><thead><tr><th>Termo</th><th>Ocorrências</th><th>Visto por último</th></tr></thead><tbody>';
+        foreach ($glossaryTopTerms as $item) {
+            $body .= '<tr><td>' . h((string) $item['term']) . '</td><td>' . (int) $item['occurrence_count'] . '</td><td>' . h(format_datetime_br((string) $item['last_seen_at'])) . '</td></tr>';
+        }
+        if (!$glossaryTopTerms) {
+            $body .= '<tr><td colspan="3" class="muted">Ainda não há termos registrados. O índice começa a aprender após a primeira pergunta, quando a migração estiver aplicada.</td></tr>';
+        }
+        $body .= '</tbody></table></div><div class="card"><h3>Relações recorrentes</h3><p class="muted">Uma relação indica que dois termos relevantes apareceram juntos em perguntas. Ela só é usada para ampliar a busca após pelo menos três ocorrências e nunca confirma um fato.</p><table><thead><tr><th>Termos</th><th>Perguntas</th><th>Força</th></tr></thead><tbody>';
+        foreach ($glossaryTopRelations as $item) {
+            $body .= '<tr><td>' . h((string) $item['term_a']) . ' ↔ ' . h((string) $item['term_b']) . '</td><td>' . (int) $item['question_count'] . '</td><td>' . h(number_format((float) $item['confidence'] * 100, 0, ',', '.')) . '%</td></tr>';
+        }
+        if (!$glossaryTopRelations) {
+            $body .= '<tr><td colspan="3" class="muted">Nenhuma relação recorrente está disponível.</td></tr>';
+        }
+        $body .= '</tbody></table></div></div>';
     } elseif ($section === 'guidance') {
         $ruleExample = "SIGLA => Nome completo da organização";
         $body .= '<div class="card"><div class="eyebrow">MEMÓRIA CONTROLADA</div><h3>Diretrizes da IA</h3><p class="muted">Defina a orientação mostrada ao público, a identidade comportamental do assistente e regras para interpretar siglas, sinônimos ou termos internos. Ao salvar, o RAGLocal atualiza um Markdown canônico auditável. As regras definem interpretação e tom; elas nunca substituem documentos como evidência factual.</p><form action="?route=guidance-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Mensagem inicial do atendimento público<textarea name="ai_public_intro" maxlength="800" rows="4" required>' . h((string) $currentGuidance['public_intro']) . '</textarea></label><span class="muted">Este é o texto exibido antes do campo de pergunta na página pública.</span><label>Alma da IA<textarea name="ai_soul" maxlength="2400" rows="8" required>' . h((string) $currentGuidance['soul']) . '</textarea></label><span class="muted">Use <code>{empresa}</code> para inserir o nome configurado da organização.</span><label>Regras interpretativas<textarea name="ai_interpretation_rules" maxlength="12000" rows="10" placeholder="' . h($ruleExample) . '">' . h((string) $currentGuidance['rules']) . '</textarea></label><span class="muted">Uma regra por linha no formato <code>termo =&gt; significado</code>. Exemplo: <code>' . h($ruleExample) . '</code>. Linhas iniciadas com <code>#</code> são ignoradas.</span><br><button>Salvar diretrizes e atualizar memória</button></form></div>';
@@ -1715,6 +1747,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $pdo->prepare("INSERT INTO messages(conversation_id, sender, body) VALUES(?, 'resident', ?)")->execute([$conversationId, $question]);
     $residentMessageId = (int) $pdo->lastInsertId();
+    try {
+        RagGlossary::recordQuestion($pdo, $question);
+    } catch (Throwable $error) {
+        error_log('RAG glossary recording unavailable: ' . $error->getMessage());
+    }
     $startedAt = microtime(true);
     $sources = context($question);
     $result = ollama_call($question, $sources);

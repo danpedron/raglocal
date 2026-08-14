@@ -282,6 +282,29 @@ CREATE TABLE ai_reassessments (
   KEY idx_ai_reassessments_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE glossary_terms (
+  term VARCHAR(120) NOT NULL PRIMARY KEY,
+  occurrence_count INT UNSIGNED NOT NULL DEFAULT 0,
+  first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_glossary_terms_usage (occurrence_count, last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE glossary_relations (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  term_a VARCHAR(120) NOT NULL,
+  term_b VARCHAR(120) NOT NULL,
+  relation_type ENUM('cooccurrence') NOT NULL DEFAULT 'cooccurrence',
+  question_count INT UNSIGNED NOT NULL DEFAULT 0,
+  confidence DECIMAL(4,2) NOT NULL DEFAULT 0.25,
+  first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_glossary_relation (term_a, term_b, relation_type),
+  KEY idx_glossary_relations_a (term_a, relation_type, question_count),
+  KEY idx_glossary_relations_b (term_b, relation_type, question_count),
+  KEY idx_glossary_relations_rank (relation_type, question_count, confidence, last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','document_enabled','document_disabled','document_removed','question_ignored','password_changed','news_sync','guidance_updated','services_sync','question_reassessed','source_created','source_updated','source_enabled','source_disabled','source_removed','source_sync') NOT NULL,

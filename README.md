@@ -41,6 +41,8 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_014_services_reassessment.sql` | Compatibilidade histórica da Carta de Serviços e reavaliação auditável |
 | `database/migration_015_generic_sources.sql` | Registro de fontes/plugins, vínculos de documentos e histórico de sincronização |
 | `database/migration_016_generic_sources_cleanup.sql` | Limpeza idempotente de fontes legadas vazias |
+| `database/migration_017_local_glossary.sql` | Termos recorrentes e relações locais de coocorrência |
+| `src/RagGlossary.php` | Registro local de termos, relações recorrentes e expansão controlada da busca |
 | `src/SourceRegistry.php` | Catálogo de plugins, fontes ativáveis, estado e remoção segura |
 | `src/RagSearchTerms.php` | Normalização determinística e termos de busca por prefixo |
 | `src/DatabaseTablePlugin.php` | Plugin genérico de banco/tabela com Loader, Chunker e atualização incremental |
@@ -63,7 +65,7 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql`, `database/migration_013_ai_guidance.sql`, `database/migration_014_services_reassessment.sql`, `database/migration_015_generic_sources.sql` e `database/migration_016_generic_sources_cleanup.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql`, `database/migration_013_ai_guidance.sql`, `database/migration_014_services_reassessment.sql`, `database/migration_015_generic_sources.sql`, `database/migration_016_generic_sources_cleanup.sql` e `database/migration_017_local_glossary.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
 Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
@@ -94,6 +96,14 @@ Para adicionar outro tipo de integração no futuro, instale um plugin que imple
 Na fila de **Intervenção humana**, o administrador pode clicar em **Reavaliar com a base atualizada** depois de importar um novo documento ou sincronizar uma fonte externa. A pergunta é pesquisada novamente no índice atual e uma nova resposta é gravada como mensagem separada, preservando a resposta anterior, o rascunho anterior, as fontes, o modelo, a confiança e o tempo da nova tentativa. A operação é registrada em `ai_reassessments` e na auditoria com o evento `question_reassessed`.
 
 A reavaliação só pode ser executada enquanto a conversa estiver `human_pending`; ela não apaga a pergunta nem a resposta anterior. Se a nova tentativa encontrar evidência suficiente, a conversa sai da fila humana. Caso contrário, permanece pendente com a resposta padrão ou, quando houver apenas evidência relacionada, com uma resposta parcial cuidadosamente limitada e o novo rascunho disponíveis para o atendente.
+
+## Glossário local de uso
+
+A seção **Glossário local** registra, exclusivamente no MariaDB da própria instalação, os termos relevantes de cada pergunta e os pares de termos que passam a aparecer juntos de forma recorrente. O recurso não consulta a internet, não usa um serviço externo em tempo de atendimento e não grava respostas nem interpretações como fatos.
+
+Depois de uma relação aparecer em pelo menos três perguntas, ela pode ampliar a consulta FULLTEXT com peso inferior à correspondência direta e à busca por prefixo. Essa expansão serve somente para recuperar documentos potencialmente relacionados. O Ollama continua recebendo como evidência apenas os trechos recuperados da base corporativa, e uma relação do glossário nunca torna uma resposta automaticamente fundamentada.
+
+Siglas, abreviações e nomenclaturas institucionais continuam sendo cadastradas em **Diretrizes da IA** no formato `termo => significado`. O glossário não substitui, altera ou infere essas regras. Essa separação mantém a interpretação institucional explícita, auditável e sob controle administrativo.
 
 ## Diretrizes administrativas da IA
 
