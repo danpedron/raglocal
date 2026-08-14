@@ -163,22 +163,67 @@ final class SourceRegistry
         return ['name' => (string) $source['name'], 'document_count' => count($documents), 'deleted_document_count' => $deletedDocumentCount];
     }
 
-    public static function deleteDocument(PDO $pdo, int $documentId): array
+    /**
+     * Exclui somente um documento enviado manualmente. Documentos de diretrizes,
+     * memória automática e fontes externas têm fluxos próprios de manutenção.
+     *
+     * @return array{title: string, kind: string, parser_version: string, chunk_count: int}
+     */
+    public static function deleteManualDocument(PDO $pdo, int $documentId): array
     {
-        $stmt = $pdo->prepare('SELECT d.title, a.storage_path FROM documents d LEFT JOIN document_artifacts a ON a.document_id = d.id WHERE d.id = ?');
+        $stmt = $pdo->prepare("SELECT d.id, d.title, d.kind, d.source_filename, d.parser_version,
+                (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunk_count,
+                EXISTS (SELECT 1 FROM document_source_links l WHERE l.document_id = d.id) AS source_linked,
+                EXISTS (SELECT 1 FROM document_artifacts a WHERE a.document_id = d.id) AS has_artifact
+            FROM documents d
+            WHERE d.id = ?
+            LIMIT 1");
         $stmt->execute([$documentId]);
         $document = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$document) {
             throw new InvalidArgumentException('Documento não encontrado.');
         }
-        $pdo->prepare('DELETE FROM documents WHERE id = ?')->execute([$documentId]);
-        if (!empty($document['storage_path'])) {
-            $file = self::storagePath((string) $document['storage_path']);
-            if (is_file($file)) {
-                @unlink($file);
+        if ((string) $document['kind'] === 'diretriz') {
+            throw new InvalidArgumentException('As diretrizes da IA devem ser atualizadas pela área própria e não podem ser excluídas aqui.');
+        }
+        if ((int) $document['source_linked'] === 1 || str_starts_with((string) ($document['source_filename'] ?? ''), 'source://')) {
+            throw new InvalidArgumentException('Este documento é gerenciado por uma fonte externa. Remova ou atualize a fonte de conhecimento correspondente.');
+        }
+        if (trim((string) ($document['source_filename'] ?? '')) === '' || (int) $document['has_artifact'] !== 1) {
+            throw new InvalidArgumentException('Este documento é gerado automaticamente e não pode ser excluído como arquivo enviado.');
+        }
+
+        $pathsStmt = $pdo->prepare('SELECT storage_path FROM document_artifacts WHERE document_id = ?');
+        $pathsStmt->execute([$documentId]);
+        $paths = [];
+        foreach ($pathsStmt->fetchAll(PDO::FETCH_ASSOC) as $artifact) {
+            if (!empty($artifact['storage_path'])) {
+                $paths[] = self::storagePath((string) $artifact['storage_path']);
             }
         }
-        return ['title' => (string) $document['title']];
+
+        $pdo->beginTransaction();
+        try {
+            $pdo->prepare('DELETE FROM documents WHERE id = ?')->execute([$documentId]);
+            $pdo->commit();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $error;
+        }
+
+        foreach (array_unique($paths) as $path) {
+            if (is_file($path)) {
+                @unlink($path);
+            }
+        }
+        return [
+            'title' => (string) $document['title'],
+            'kind' => (string) $document['kind'],
+            'parser_version' => (string) $document['parser_version'],
+            'chunk_count' => (int) $document['chunk_count'],
+        ];
     }
 
     private static function normalizeConfig(array $config, string $pluginKey): array
@@ -250,7 +295,11 @@ final class SourceRegistry
     {
         $base = rtrim((string) ($_ENV['RAG_UPLOAD_DIR'] ?? getenv('RAG_UPLOAD_DIR') ?: dirname(__DIR__) . '/storage/uploads'), '/');
         if (str_starts_with($relative, 'storage/uploads/')) {
-            return dirname($base) . '/' . substr($relative, strlen('storage/uploads/'));
+            $filename = substr($relative, strlen('storage/uploads/'));
+            if ($filename === '' || basename($filename) !== $filename) {
+                throw new InvalidArgumentException('Caminho de artefato inválido.');
+            }
+            return $base . '/' . $filename;
         }
         return $relative;
     }

@@ -26,6 +26,7 @@ function load_env(string $file): void
 load_env(dirname(__DIR__) . '/config/.env');
 require_once dirname(__DIR__) . '/src/SecretBox.php';
 require_once dirname(__DIR__) . '/src/OllamaResponse.php';
+require_once dirname(__DIR__) . '/src/RagSearchTerms.php';
 require_once dirname(__DIR__) . '/src/AiGuidance.php';
 require_once dirname(__DIR__) . '/src/SourceRegistry.php';
 require_once dirname(__DIR__) . '/src/DatabaseTablePlugin.php';
@@ -700,22 +701,30 @@ function context(string $question): array
         return $validatedMemory;
     }
 
+    $prefixQuery = RagSearchTerms::booleanPrefixQuery($question);
     $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind,
             dsl.public_url,
             NULL AS published_at,
             NULL AS service_department,
-            MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
+            MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score,
+            MATCH(c.content) AGAINST(:prefix_score IN BOOLEAN MODE) AS prefix_score
         FROM chunks c
         JOIN documents d ON d.id = c.document_id
         LEFT JOIN document_source_links dsl ON dsl.document_id = d.id AND dsl.is_active = 1
         LEFT JOIN knowledge_sources ks ON ks.id = dsl.source_id AND ks.enabled = 1
         WHERE d.status = 'ready' AND d.kind <> 'diretriz'
           AND (dsl.id IS NULL OR ks.id IS NOT NULL)
-          AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
-        ORDER BY score DESC, c.id DESC LIMIT 6");
+          AND (
+              MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0
+              OR MATCH(c.content) AGAINST(:prefix_filter IN BOOLEAN MODE) > 0
+              OR c.content LIKE :like
+          )
+        ORDER BY GREATEST(score, prefix_score) DESC, c.id DESC LIMIT 6");
     $stmt->execute([
         'q' => $question,
+        'prefix_score' => $prefixQuery,
         'q2' => $question,
+        'prefix_filter' => $prefixQuery,
         'like' => '%' . mb_substr($question, 0, 100) . '%',
     ]);
     return $stmt->fetchAll();
@@ -1075,7 +1084,7 @@ function layout(string $title, string $body): never
     $logoHtml = ($logoPath !== '' && is_file($logoPath)) ? '<img class="brand-logo" src="?route=brand-logo" alt="Logotipo de ' . h($brandName) . '">' : '';
     $subtitleHtml = $subtitle !== '' ? '<div class="brand-subtitle">' . h($subtitle) . '</div>' : '';
     $adminLink = $logged ? '<a href="?route=admin">Administração</a>' : '';
-    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — ' . h($brandName) . '</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.button-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.button-secondary{background:#667085}.button-secondary:hover{background:#475467}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{display:flex;gap:12px;align-items:center}.brand-logo{width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff}.brand-subtitle{color:#667085;font-size:.85em;margin-top:2px}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}.admin-shell{margin-top:16px}.admin-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.admin-head h2{margin:4px 0}.admin-head p{margin:0}.admin-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.eyebrow{color:#667085;font-size:.75em;font-weight:700;letter-spacing:.08em}.admin-menu{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;padding:8px;background:#eef2f6;border-radius:10px}.admin-menu a{display:inline-flex;align-items:center;gap:7px;padding:10px 13px;border-radius:8px;text-decoration:none;color:#344054;font-weight:600}.admin-menu a:hover{background:#fff}.admin-menu a.active{background:#155eef;color:#fff}.nav-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:#d92d20;color:#fff;font-size:.78em}.admin-menu a.active .nav-count{background:#fff;color:#d92d20}.admin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}.admin-stat{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:13px 15px}.admin-stat strong{display:block;font-size:1.45em;color:#101828}.urgent-alert{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border:2px solid #d92d20;background:#fff1f0;color:#7a271a;border-radius:10px;padding:14px 16px;margin:14px 0}.urgent-alert strong{font-size:1.05em}.success-alert{border:1px solid #abefc6;background:#ecfdf3;color:#05603a;border-radius:10px;padding:12px 14px;margin:14px 0}.pending-card{border:2px solid #f04438;background:#fffafa;border-radius:10px;padding:15px;margin:14px 0}.pending-card .pending-meta{color:#7a271a;font-size:.9em;margin-bottom:8px}.pending-card textarea{min-height:100px}.section-intro{margin-top:-4px}.empty-state{padding:22px;text-align:center;border:1px dashed #cfd4dc;border-radius:10px;color:#667085}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{font-size:.8em;color:#667085;text-transform:uppercase;letter-spacing:.04em}@media(max-width:640px){th:nth-child(3),td:nth-child(3){display:none}.admin-menu a{flex:1 1 45%}}</style></head><body><main><div class="top"><div class="brand">' . $logoHtml . '<div><h1>' . h($brandName) . '</h1>' . $subtitleHtml . '</div></div>' . $adminLink . '</div>' . $body . '</main></body></html>';
+    echo '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . h($title) . ' — ' . h($brandName) . '</title><style>body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#17202a;margin:0}main{max-width:960px;margin:32px auto;padding:0 16px}.card{background:white;border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 12px #0001}textarea,input,select{width:100%;box-sizing:border-box;padding:11px;border:1px solid #ccd3da;border-radius:7px;margin:6px 0 12px}button{background:#155eef;color:#fff;border:0;padding:11px 16px;border-radius:7px;cursor:pointer}.button-danger{background:#b42318}.button-danger:hover{background:#8f1d14}.button-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.button-secondary{background:#667085}.button-secondary:hover{background:#475467}.muted{color:#667085;font-size:.92em}.answer{white-space:pre-wrap;line-height:1.55}.cite{border-left:3px solid #b7c8ff;padding:8px 12px;margin:8px 0;background:#f7f9ff}.reference{border-left:3px solid #f59e0b;padding:10px 12px;margin:10px 0;background:#fffbeb;white-space:pre-wrap}.response-source,.response-meta{color:#667085;font-size:.78em}.response-source{border-left:2px solid #b7c8ff;padding:5px 9px;margin:6px 0;background:#f7f9ff}.response-meta{margin:10px 0 0}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{display:flex;gap:12px;align-items:center}.brand-logo{width:52px;height:52px;object-fit:contain;border-radius:8px;background:#fff}.brand-subtitle{color:#667085;font-size:.85em;margin-top:2px}a{color:#155eef}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.badge{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef2ff;color:#3446a8;font-size:.85em}.admin-shell{margin-top:16px}.admin-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}.admin-head h2{margin:4px 0}.admin-head p{margin:0}.admin-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.eyebrow{color:#667085;font-size:.75em;font-weight:700;letter-spacing:.08em}.admin-menu{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 14px;padding:8px;background:#eef2f6;border-radius:10px}.admin-menu a{display:inline-flex;align-items:center;gap:7px;padding:10px 13px;border-radius:8px;text-decoration:none;color:#344054;font-weight:600}.admin-menu a:hover{background:#fff}.admin-menu a.active{background:#155eef;color:#fff}.nav-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:#d92d20;color:#fff;font-size:.78em}.admin-menu a.active .nav-count{background:#fff;color:#d92d20}.admin-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}.admin-stat{background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:13px 15px}.admin-stat strong{display:block;font-size:1.45em;color:#101828}.urgent-alert{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border:2px solid #d92d20;background:#fff1f0;color:#7a271a;border-radius:10px;padding:14px 16px;margin:14px 0}.urgent-alert strong{font-size:1.05em}.success-alert{border:1px solid #abefc6;background:#ecfdf3;color:#05603a;border-radius:10px;padding:12px 14px;margin:14px 0}.pending-card{border:2px solid #f04438;background:#fffafa;border-radius:10px;padding:15px;margin:14px 0}.pending-card .pending-meta{color:#7a271a;font-size:.9em;margin-bottom:8px}.pending-card textarea{min-height:100px}.section-intro{margin-top:-4px}.empty-state{padding:22px;text-align:center;border:1px dashed #cfd4dc;border-radius:10px;color:#667085}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid #eaecf0;vertical-align:top}th{font-size:.8em;color:#667085;text-transform:uppercase;letter-spacing:.04em}@media(max-width:640px){th:nth-child(3),td:nth-child(3){display:none}.admin-menu a{flex:1 1 45%}}</style></head><body><main><div class="top"><div class="brand">' . $logoHtml . '<div><h1>' . h($brandName) . '</h1>' . $subtitleHtml . '</div></div>' . $adminLink . '</div>' . $body . '</main></body></html>';
     exit;
 }
 
@@ -1445,6 +1454,27 @@ if ($route === 'upload' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
+if ($route === 'document-delete' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $documentId = (int) ($_POST['document_id'] ?? 0);
+    try {
+        $deleted = SourceRegistry::deleteManualDocument(db(), $documentId);
+        audit_event('document_deleted', 'admin', ['metadata' => [
+            'document_id' => $documentId,
+            'title' => $deleted['title'],
+            'kind' => $deleted['kind'],
+            'parser_version' => $deleted['parser_version'],
+            'chunk_count' => $deleted['chunk_count'],
+            'deleted_by' => (int) $_SESSION['user']['id'],
+        ]]);
+        flash('Documento e seus trechos indexados foram excluídos. Você já pode enviar uma versão atualizada.');
+    } catch (Throwable $error) {
+        flash('Não foi possível excluir este documento: ' . $error->getMessage());
+    }
+    header('Location: ?route=admin&section=knowledge');
+    exit;
+}
+
 if ($route === 'ignore' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $conversationId = (int) ($_POST['conversation_id'] ?? 0);
@@ -1500,7 +1530,12 @@ if ($route === 'admin') {
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
-    $documents = $pdo->query('SELECT title, kind, status, created_at FROM documents ORDER BY id DESC LIMIT 30')->fetchAll();
+    $documents = $pdo->query("SELECT d.id, d.title, d.kind, d.status, d.source_filename, d.parser_version, d.canonical_sha256, d.created_at, d.processed_at,
+            (SELECT COUNT(*) FROM chunks c WHERE c.document_id = d.id) AS chunk_count,
+            EXISTS (SELECT 1 FROM document_artifacts a WHERE a.document_id = d.id) AS has_artifact,
+            EXISTS (SELECT 1 FROM document_source_links l WHERE l.document_id = d.id) AS source_linked
+        FROM documents d
+        ORDER BY d.id DESC LIMIT 30")->fetchAll();
     $documentTotal = (int) $pdo->query("SELECT COUNT(*) FROM documents WHERE status = 'ready'")->fetchColumn();
     $pending = $pdo->query("SELECT c.id, c.ai_draft, c.ai_confidence, c.ai_model, m.body, m.created_at AS question_created_at FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.status = 'human_pending' AND m.sender = 'resident' AND m.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.sender = 'resident') ORDER BY m.created_at DESC, m.id DESC")->fetchAll();
     $pendingCount = count($pending);
@@ -1557,12 +1592,25 @@ if ($route === 'admin') {
         }
         $body .= '</div>';
     } elseif ($section === 'knowledge') {
-        $body .= '<div class="card"><h3>Adicionar à base de conhecimento</h3><p class="muted">Envie PDF, TXT ou MD. O arquivo é convertido para Markdown canônico e indexado para recuperação.</p><form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Título<input name="title" required></label><label>Tipo<select name="kind"><option value="regimento">Regimento interno</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select></label><label>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required></label><button>Enviar e indexar</button></form></div><div class="card"><h3>Documentos indexados</h3><p class="muted">Os documentos abaixo estão disponíveis como evidência para o RAG.</p><table><thead><tr><th>Documento</th><th>Tipo</th><th>Status</th><th>Adicionado em</th></tr></thead><tbody>';
+        $body .= '<div class="card"><h3>Adicionar à base de conhecimento</h3><p class="muted">Envie PDF, TXT ou MD. O arquivo é convertido para Markdown canônico e indexado para recuperação. Para substituir um arquivo, exclua a versão anterior e envie a versão atualizada.</p><form action="?route=upload" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Título<input name="title" required></label><label>Tipo<select name="kind"><option value="regimento">Regimento interno</option><option value="ata">Ata</option><option value="memoria">Memória validada</option><option value="manutencao">Manutenção / certificado técnico</option></select></label><label>Arquivo PDF, TXT ou MD<input type="file" name="document" accept=".pdf,.txt,.md" required></label><button>Enviar e indexar</button></form></div><div class="card"><h3>Documentos indexados</h3><p class="muted">A versão exibida identifica o processador que gerou o Markdown RAG. A exclusão remove o documento, seus trechos e o arquivo Markdown armazenado; diretrizes, memória automática e fontes externas possuem fluxos próprios.</p><table><thead><tr><th>Documento</th><th>Tipo</th><th>Status</th><th>Processamento</th><th>Ações</th></tr></thead><tbody>';
         foreach ($documents as $document) {
-            $body .= '<tr><td>' . h((string) $document['title']) . '</td><td>' . h(document_kind_label((string) $document['kind'])) . '</td><td><span class="badge">' . h((string) $document['status']) . '</span></td><td>' . h(format_datetime_br((string) $document['created_at'])) . '</td></tr>';
+            $version = trim((string) ($document['parser_version'] ?? '')) ?: 'legado';
+            $processedAt = !empty($document['processed_at']) ? format_datetime_br((string) $document['processed_at']) : 'ainda não processado';
+            $sourceName = trim((string) ($document['source_filename'] ?? ''));
+            $hash = trim((string) ($document['canonical_sha256'] ?? ''));
+            $details = 'Versão: ' . h($version) . ' · ' . (int) $document['chunk_count'] . ' ' . ((int) $document['chunk_count'] === 1 ? 'trecho' : 'trechos') . '<br><span class="muted">Processado: ' . h($processedAt) . ($hash !== '' ? ' · SHA-256: ' . h(substr($hash, 0, 12)) . '…' : '') . ($sourceName !== '' ? ' · Arquivo: ' . h($sourceName) : '') . '</span>';
+            $canDelete = (string) $document['kind'] !== 'diretriz' && (int) $document['source_linked'] !== 1 && (int) $document['has_artifact'] === 1 && $sourceName !== '' && !str_starts_with($sourceName, 'source://');
+            if ($canDelete) {
+                $action = '<form action="?route=document-delete" method="post" onsubmit="return confirm(\'Excluir este documento e todos os seus trechos indexados? Esta ação não pode ser desfeita.\')"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="document_id" value="' . (int) $document['id'] . '"><button class="button-danger">Excluir arquivo</button></form>';
+            } elseif ((int) $document['source_linked'] === 1 || str_starts_with($sourceName, 'source://')) {
+                $action = '<span class="muted">Gerenciado por fonte externa</span>';
+            } else {
+                $action = '<span class="muted">Gerado pelo sistema</span>';
+            }
+            $body .= '<tr><td><b>' . h((string) $document['title']) . '</b></td><td>' . h(document_kind_label((string) $document['kind'])) . '</td><td><span class="badge">' . h((string) $document['status']) . '</span><br><span class="muted">Adicionado: ' . h(format_datetime_br((string) $document['created_at'])) . '</span></td><td>' . $details . '</td><td>' . $action . '</td></tr>';
         }
         if (!$documents) {
-            $body .= '<tr><td colspan="4" class="muted">Nenhum documento indexado.</td></tr>';
+            $body .= '<tr><td colspan="5" class="muted">Nenhum documento indexado.</td></tr>';
         }
         $body .= '</tbody></table></div>';
     } elseif ($section === 'branding') {
