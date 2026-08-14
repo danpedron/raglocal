@@ -491,7 +491,10 @@ function ollama_retry_prompt(string $question, array $sources): string
         $evidence[] = '[' . ($index + 1) . '] Documento: ' . (string) ($source['title'] ?? 'Fonte sem título') . "\n" . $content;
     }
 
-    return "Responda à PERGUNTA usando exclusivamente as EVIDÊNCIAS numeradas abaixo. Não explique o processo e não use conhecimento externo. Se uma evidência responder diretamente, grounded deve ser true, confidence deve ficar entre 0.75 e 1.00, answer deve ter uma ou duas frases em português brasileiro e source_numbers deve listar apenas as evidências usadas. Se não houver resposta direta, grounded deve ser false, confidence deve ser 0, answer deve informar que não há base suficiente e source_numbers deve ser []. Retorne somente um objeto JSON com grounded, confidence, answer e source_numbers.\n\nEVIDÊNCIAS:\n" . implode("\n\n", $evidence) . "\n\nPERGUNTA:\n" . $question;
+    return "Responda à PERGUNTA usando exclusivamente as EVIDÊNCIAS numeradas abaixo. Não explique o processo e não use conhecimento externo.\n\n" .
+        "Use answer_mode=direct e grounded=true somente quando as evidências responderem diretamente ao objeto específico perguntado; confidence deve ficar entre 0.75 e 1.00. " .
+        "Use answer_mode=partial e grounded=false quando as evidências confirmarem apenas uma parte ou uma categoria mais ampla da pergunta. Nesse caso, answer deve primeiro informar o que a base confirma e depois dizer explicitamente que a base consultada não confirma o item específico pedido, encaminhando essa confirmação para atendimento humano. Não transforme vacinação em confirmação de vacina contra dengue, nem menção a suspeita de dengue em evidência de vacina. Confidence deve ficar entre 0.55 e 0.74. " .
+        "Use answer_mode=insufficient e grounded=false, confidence=0 e source_numbers=[] somente quando não houver nenhuma evidência útil relacionada. Em direct ou partial, cite somente as evidências realmente usadas. Retorne somente um objeto JSON com grounded, answer_mode, confidence, answer e source_numbers.\n\nEVIDÊNCIAS:\n" . implode("\n\n", $evidence) . "\n\nPERGUNTA:\n" . $question;
 }
 
 function ollama_call(string $question, array $sources): array
@@ -503,6 +506,7 @@ function ollama_call(string $question, array $sources): array
             return [
                 'approved' => true,
                 'answer' => $validatedAnswer,
+                'answer_mode' => 'direct',
                 'confidence' => 1.0,
                 'source_numbers' => [1],
                 'model' => 'memoria-validada',
@@ -515,6 +519,7 @@ function ollama_call(string $question, array $sources): array
         return [
             'approved' => false,
             'answer' => '',
+            'answer_mode' => 'insufficient',
             'confidence' => 0.0,
             'source_numbers' => [],
             'model' => setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b')),
@@ -535,10 +540,9 @@ function ollama_call(string $question, array $sources): array
     $prompt = "Você é o assistente oficial de " . brand_name() . ".\n\n" .
         $guidance . "\n\n" .
         "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. Memórias marcadas como [RAG_MEMORIA_VALIDADA] são respostas humanas aprovadas e podem ser usadas como evidência quando a pergunta atual tiver a mesma intenção, mesmo que esteja formulada com outras palavras. Nesse caso, adapte a redação apenas o necessário e preserve o conteúdo da resposta validada; não acrescente conhecimento geral. " .
-        "Se alguma fonte sustentar diretamente a resposta, responda em 1 a 3 frases completas, copiando ou resumindo somente os fatos dessa fonte; inclua o fato principal e a informação complementar mais relevante que esteja na mesma fonte, como serviço realizado, data ou validade. Se a pergunta pedir quando, informe a data e explique a que serviço ou evento ela se refere. Nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
-        "Se nenhuma fonte sustentar diretamente a resposta, grounded deve ser false, confidence deve ser 0, source_numbers deve ser [] e answer deve dizer que não encontrou base suficiente. " .
-        "Nunca use conhecimento geral, não complete lacunas, não faça suposições e não invente horários, multas, artigos, datas, decisões ou interpretações. " .
-        "Retorne SOMENTE um JSON válido, sem markdown, exatamente com estas chaves: grounded (boolean), confidence (number), answer (string em português brasileiro), source_numbers (array de números).\n\n" .
+        "Classifique a resposta em uma destas modalidades. Em direct/grounded=true, alguma fonte responde diretamente ao objeto específico perguntado: responda em 1 a 3 frases completas, resumindo somente fatos da fonte, e use confidence de 0.75 a 1.00. Em partial/grounded=false, as fontes confirmam apenas uma parte ou uma categoria mais ampla: responda primeiro o que a base confirma e declare que ela não confirma o item específico solicitado, encaminhando essa confirmação para atendimento humano; use confidence de 0.55 a 0.74 e cite as fontes usadas. Exemplo: evidência de que UBS têm vacinação não confirma a disponibilidade, indicação ou elegibilidade de vacina contra dengue. Uma menção a suspeitas de dengue também não é evidência de vacina contra dengue. Em insufficient/grounded=false, não há evidência útil relacionada: informe que não encontrou base suficiente, use confidence 0 e source_numbers=[]. " .
+        "Nunca use conhecimento geral, não complete lacunas, não faça suposições e não invente horários, multas, artigos, datas, decisões, diagnósticos, disponibilidade, calendário ou elegibilidade. Em particular, não afirme que uma vacina específica está disponível sem fonte que o diga. " .
+        "Retorne SOMENTE um JSON válido, sem markdown, exatamente com estas chaves: grounded (boolean), answer_mode (direct|partial|insufficient), confidence (number), answer (string em português brasileiro), source_numbers (array de números).\n\n" .
         "CONTEXTO:\n" . $context . "\n\nPERGUNTA:\n" . $question;
 
     $generated = ollama_generate($model, $prompt, 260);
@@ -546,8 +550,9 @@ function ollama_call(string $question, array $sources): array
     $parsed = $initialError === '' ? OllamaResponse::parse($generated['response'], count($sources)) : null;
     $retryableErrors = ['ollama_model_error', 'invalid_ollama_response'];
     $hasDirectEvidenceOverlap = RagSearchTerms::hasDirectEvidenceOverlap($question, $sources);
+    $hasPartialEvidenceOverlap = RagSearchTerms::hasPartialEvidenceOverlap($question, $sources);
     $shouldRetry = $initialError === ''
-        ? (empty($parsed['valid']) || (!$parsed['grounded'] && $hasDirectEvidenceOverlap))
+        ? (empty($parsed['valid']) || (!$parsed['grounded'] && ($hasDirectEvidenceOverlap || $hasPartialEvidenceOverlap)))
         : in_array($initialError, $retryableErrors, true);
     if ($shouldRetry) {
         $retry = ollama_generate($model, ollama_retry_prompt($question, $sources), 180);
@@ -556,21 +561,29 @@ function ollama_call(string $question, array $sources): array
         }
         if (empty($parsed['valid'])) {
             $error = $retry['error'] !== '' ? (string) $retry['error'] : 'retry_' . (string) ($parsed['error'] ?? $initialError);
-            return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $error];
+            return ['approved' => false, 'answer' => '', 'answer_mode' => 'insufficient', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $error];
         }
     } elseif ($initialError !== '') {
-        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $initialError];
+        return ['approved' => false, 'answer' => '', 'answer_mode' => 'insufficient', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $initialError];
     }
 
     $confidence = (float) $parsed['confidence'];
     $sourceNumbers = $parsed['source_numbers'];
     $answer = (string) $parsed['answer'];
     $grounded = (bool) $parsed['grounded'];
-    $approved = $grounded && $answer !== '' && $confidence >= rag_min_confidence() && count($sourceNumbers) >= rag_min_sources();
+    $answerMode = (string) ($parsed['answer_mode'] ?? ($grounded ? 'direct' : 'insufficient'));
+    $approved = $answerMode === 'direct' && $grounded && $answer !== '' && $confidence >= rag_min_confidence() && count($sourceNumbers) >= rag_min_sources();
+    if ($answerMode === 'partial' && ($answer === '' || $confidence < 0.55 || count($sourceNumbers) < 1)) {
+        $answerMode = 'insufficient';
+        $answer = '';
+        $confidence = 0.0;
+        $sourceNumbers = [];
+    }
 
     return [
         'approved' => $approved,
         'answer' => $answer,
+        'answer_mode' => $answerMode,
         'confidence' => $confidence,
         'source_numbers' => $sourceNumbers,
         'model' => $model,
@@ -784,8 +797,9 @@ function reassess_conversation(PDO $pdo, int $conversationId): array
     $result = ollama_call((string) $conversation['question'], $sources);
     $responseTimeMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
     $draft = trim((string) ($result['answer'] ?? ''));
+    $answerMode = (string) ($result['answer_mode'] ?? ($result['approved'] ? 'direct' : 'insufficient'));
     $approved = !empty($result['approved']);
-    $publicAnswer = $approved ? $draft : default_scope_response();
+    $publicAnswer = $approved || ($answerMode === 'partial' && $draft !== '') ? $draft : default_scope_response();
     $status = $approved ? 'answered' : 'human_pending';
     $citations = citations_from_result($result, $sources);
 
@@ -810,6 +824,7 @@ function reassess_conversation(PDO $pdo, int $conversationId): array
         'question_message_id' => (int) $conversation['question_message_id'],
         'new_ai_message_id' => $newAiMessageId,
         'status' => $status,
+        'answer_mode' => $answerMode,
         'public_answer' => $publicAnswer,
         'draft' => $draft,
         'confidence' => (float) ($result['confidence'] ?? 0),
@@ -1294,8 +1309,8 @@ if ($route === 'reassess' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new InvalidArgumentException('Atendimento inválido.');
         }
         $result = reassess_conversation(db(), $conversationId);
-        audit_event('question_reassessed', 'admin', ['conversation_id' => $conversationId, 'message_id' => $result['new_ai_message_id'], 'question' => $result['question'], 'answer' => $result['public_answer'], 'ai_draft' => $result['draft'] !== '' ? $result['draft'] : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $result['citations'], 'response_time_ms' => $result['response_time_ms'], 'metadata' => ['status' => $result['status'], 'source_count' => $result['source_count'], 'ollama_error' => $result['ollama_error'], 'reassessed_by' => (int) $_SESSION['user']['id']]]);
-        flash($result['status'] === 'answered' ? 'A IA encontrou uma resposta fundamentada após a atualização da base. A pergunta saiu da fila humana.' : 'A IA foi reavaliada, mas ainda não encontrou evidência suficiente.');
+        audit_event('question_reassessed', 'admin', ['conversation_id' => $conversationId, 'message_id' => $result['new_ai_message_id'], 'question' => $result['question'], 'answer' => $result['public_answer'], 'ai_draft' => $result['draft'] !== '' ? $result['draft'] : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $result['citations'], 'response_time_ms' => $result['response_time_ms'], 'metadata' => ['status' => $result['status'], 'answer_mode' => $result['answer_mode'], 'source_count' => $result['source_count'], 'ollama_error' => $result['ollama_error'], 'reassessed_by' => (int) $_SESSION['user']['id']]]);
+        flash($result['status'] === 'answered' ? 'A IA encontrou uma resposta fundamentada após a atualização da base. A pergunta saiu da fila humana.' : (($result['answer_mode'] ?? '') === 'partial' ? 'A IA encontrou apenas evidência parcial; a pergunta continua aguardando confirmação humana.' : 'A IA foi reavaliada, mas ainda não encontrou evidência suficiente.'));
     } catch (Throwable $error) {
         audit_event('question_reassessed', 'admin', ['conversation_id' => $conversationId > 0 ? $conversationId : null, 'metadata' => ['status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8'), 'reassessed_by' => (int) $_SESSION['user']['id']]]);
         flash('Não foi possível reavaliar a pergunta: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
@@ -1689,9 +1704,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $result = ollama_call($question, $sources);
     $responseTimeMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
     $reference = $result['answer'];
+    $answerMode = (string) ($result['answer_mode'] ?? ($result['approved'] ? 'direct' : 'insufficient'));
     if ($result['approved']) {
         $publicAnswer = $result['answer'];
         $status = 'answered';
+    } elseif ($answerMode === 'partial' && $result['answer'] !== '') {
+        $publicAnswer = $result['answer'];
+        $status = 'human_pending';
     } else {
         $publicAnswer = default_scope_response();
         $status = 'human_pending';
@@ -1707,7 +1726,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $pdo->prepare('INSERT INTO messages(conversation_id, sender, body, citations) VALUES(?, \'ai\', ?, ?)')->execute([$conversationId, $publicAnswer, json_encode($citations, JSON_UNESCAPED_UNICODE)]);
     $aiMessageId = (int) $pdo->lastInsertId();
     audit_event('question', 'resident', ['conversation_id' => $conversationId, 'message_id' => $residentMessageId, 'question' => $question, 'metadata' => ['source_count' => count($sources)]]);
-    audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'response_time_ms' => $responseTimeMs, 'metadata' => ['approved' => (bool) $result['approved'], 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources), 'response_time_ms' => $responseTimeMs]]);
+    audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'response_time_ms' => $responseTimeMs, 'metadata' => ['approved' => (bool) $result['approved'], 'answer_mode' => $answerMode, 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources), 'response_time_ms' => $responseTimeMs]]);
     $body = '<div class="card"><h2>Resposta</h2><div class="answer">' . h($publicAnswer) . '</div>';
     foreach ($citations as $citation) {
         $citationTitle = h((string) $citation['title']);

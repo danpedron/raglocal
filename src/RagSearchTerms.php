@@ -68,4 +68,34 @@ final class RagSearchTerms
 
         return false;
     }
+
+    /**
+     * Detecta material relacionado que pode sustentar apenas uma resposta
+     * parcial. A correspondência pode estar distribuída entre as fontes:
+     * por exemplo, uma fonte pode mencionar vacinação e outra dengue, sem
+     * que nenhuma delas confirme a vacina contra dengue.
+     *
+     * @param list<array<string, mixed>> $sources
+     */
+    public static function hasPartialEvidenceOverlap(string $question, array $sources): bool
+    {
+        $terms = self::terms($question);
+        if (!$terms || !$sources) {
+            return false;
+        }
+
+        foreach (array_slice($sources, 0, 6) as $source) {
+            $content = mb_strtolower((string) ($source['content'] ?? ''), 'UTF-8');
+            if ($content === '') {
+                continue;
+            }
+            foreach ($terms as $term) {
+                if (preg_match('/(?<![\p{L}\p{N}])' . preg_quote($term, '/') . '[\p{L}\p{N}]*/u', $content) === 1) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
 }

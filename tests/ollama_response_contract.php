@@ -19,6 +19,22 @@ assert_same(true, $valid['valid'], 'A resposta fundamentada deve respeitar o con
 assert_same(true, $valid['grounded'], 'A evidência direta deve permanecer fundamentada.');
 assert_same(0.95, $valid['confidence'], 'A confiança deve ser preservada.');
 assert_same([1], $valid['source_numbers'], 'A fonte citada deve ser preservada.');
+assert_same('direct', $valid['answer_mode'], 'A resposta fundamentada deve ser classificada como direta.');
+
+$partial = OllamaResponse::parse([
+    'response' => '{"grounded":false,"answer_mode":"partial","confidence":0.60,"answer":"A base confirma salas de vacinação, mas não confirma a disponibilidade da vacina contra dengue; é necessária confirmação humana.","source_numbers":[1,2]}',
+], 2);
+assert_same(true, $partial['valid'], 'Uma resposta parcialmente fundamentada deve respeitar o contrato.');
+assert_same(false, $partial['grounded'], 'A resposta parcial não pode ser aprovada como diretamente fundamentada.');
+assert_same('partial', $partial['answer_mode'], 'A modalidade parcial deve ser preservada.');
+assert_same(0.60, $partial['confidence'], 'A confiança parcial deve ser preservada.');
+assert_same([1, 2], $partial['source_numbers'], 'As fontes parciais devem ser preservadas.');
+
+$inconsistent = OllamaResponse::parse([
+    'response' => '{"grounded":true,"answer_mode":"partial","confidence":0.60,"answer":"Resposta incoerente","source_numbers":[1]}',
+], 1);
+assert_same(false, $inconsistent['valid'], 'Grounded=true com modalidade parcial deve ser rejeitado.');
+assert_same('inconsistent_answer_mode', $inconsistent['error'], 'A inconsistência da modalidade deve ser identificada.');
 
 $stringBoolean = OllamaResponse::parse([
     'response' => '{"grounded":"true","confidence":"95","answer":"Laboratório Municipal.","source_numbers":[1]}',

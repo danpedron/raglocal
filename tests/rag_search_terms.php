@@ -25,6 +25,17 @@ if (!RagSearchTerms::hasDirectEvidenceOverlap('Como faço para solicitar corte d
     throw new RuntimeException('O retry focado deve reconhecer corte e árvores como evidência direta.');
 }
 
+$partialSources = [
+    ['content' => 'As unidades de saúde possuem sala de vacinação e realizam vacinas de rotina.'],
+    ['content' => 'O atendimento de urgência recebe casos com suspeitas de dengue.'],
+];
+if (RagSearchTerms::hasDirectEvidenceOverlap('Quero tomar a vacina da dengue', $partialSources)) {
+    throw new RuntimeException('Vacinação genérica e suspeita de dengue não podem ser tratadas como evidência direta da vacina contra dengue.');
+}
+if (!RagSearchTerms::hasPartialEvidenceOverlap('Quero tomar a vacina da dengue', $partialSources)) {
+    throw new RuntimeException('Evidência relacionada de vacinação ou dengue deve acionar o retry parcial.');
+}
+
 if (RagSearchTerms::hasDirectEvidenceOverlap('Como eu faço para isso?', [['content' => 'Conteúdo administrativo genérico']])) {
     throw new RuntimeException('Perguntas sem termos informativos não podem acionar retry por sobreposição.');
 }

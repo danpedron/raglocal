@@ -93,7 +93,7 @@ Para adicionar outro tipo de integração no futuro, instale um plugin que imple
 
 Na fila de **Intervenção humana**, o administrador pode clicar em **Reavaliar com a base atualizada** depois de importar um novo documento ou sincronizar uma fonte externa. A pergunta é pesquisada novamente no índice atual e uma nova resposta é gravada como mensagem separada, preservando a resposta anterior, o rascunho anterior, as fontes, o modelo, a confiança e o tempo da nova tentativa. A operação é registrada em `ai_reassessments` e na auditoria com o evento `question_reassessed`.
 
-A reavaliação só pode ser executada enquanto a conversa estiver `human_pending`; ela não apaga a pergunta nem a resposta anterior. Se a nova tentativa encontrar evidência suficiente, a conversa sai da fila humana. Caso contrário, permanece pendente com a resposta padrão e o novo rascunho disponíveis para o atendente.
+A reavaliação só pode ser executada enquanto a conversa estiver `human_pending`; ela não apaga a pergunta nem a resposta anterior. Se a nova tentativa encontrar evidência suficiente, a conversa sai da fila humana. Caso contrário, permanece pendente com a resposta padrão ou, quando houver apenas evidência relacionada, com uma resposta parcial cuidadosamente limitada e o novo rascunho disponíveis para o atendente.
 
 ## Diretrizes administrativas da IA
 
@@ -107,7 +107,7 @@ Regras interpretativas devem ser cadastradas uma por linha no formato `termo => 
 
 As perguntas encaminhadas para atendimento humano são exibidas pela data e hora da mensagem original, em ordem decrescente. O painel mostra o tempo de espera, o rascunho da IA e permite registrar a resposta validada. Também é possível **ignorar uma pergunta sem responder**; nesse caso, ela sai da fila, a conversa é encerrada e a decisão permanece na auditoria.
 
-Quando a evidência é insuficiente, a resposta pública usa o texto configurado em **Confiabilidade e Ollama**. O marcador `{empresa}` é substituído automaticamente pelo nome definido em Identidade da empresa. O padrão inicial é: “As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.” Essa resposta pode ser personalizada sem alterar a política de fundamentação. A resposta humana validada é incorporada à memória, mas continua sujeita à recuperação por intenção, à auditoria e às regras de fundamentação; ela não altera os parâmetros do modelo nem treina pesos do Ollama.
+Quando não há evidência útil, a resposta pública usa o texto configurado em **Confiabilidade e Ollama**. O marcador `{empresa}` é substituído automaticamente pelo nome definido em Identidade da empresa. O padrão inicial é: “As perguntas devem ser referentes a {empresa}. Sua pergunta não está no contexto deste agente.” Essa resposta pode ser personalizada sem alterar a política de fundamentação. Quando a base confirma somente uma parte ou uma categoria mais ampla, o modelo pode retornar `answer_mode=partial`: a pessoa recebe o trecho confirmado e o limite explícito da base, mas a conversa permanece `human_pending` para confirmar o item específico. Por exemplo, evidência de salas de vacinação não confirma disponibilidade, indicação ou elegibilidade de vacina contra dengue. A resposta humana validada é incorporada à memória, mas continua sujeita à recuperação por intenção, à auditoria e às regras de fundamentação; ela não altera os parâmetros do modelo nem treina pesos do Ollama.
 
 ## Versionamento e privacidade
 

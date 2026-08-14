@@ -12,6 +12,10 @@ final class OllamaResponse
                 'grounded' => ['type' => 'boolean'],
                 'confidence' => ['type' => 'number'],
                 'answer' => ['type' => 'string'],
+                'answer_mode' => [
+                    'type' => 'string',
+                    'enum' => ['direct', 'partial', 'insufficient'],
+                ],
                 'source_numbers' => [
                     'type' => 'array',
                     'items' => ['type' => 'integer'],
@@ -58,6 +62,13 @@ final class OllamaResponse
             $confidence /= 100;
         }
         $confidence = max(0.0, min(1.0, $confidence));
+        $answerMode = $data['answer_mode'] ?? ($grounded ? 'direct' : 'insufficient');
+        if (!is_string($answerMode) || !in_array($answerMode, ['direct', 'partial', 'insufficient'], true)) {
+            return self::invalid('invalid_contract');
+        }
+        if (($answerMode === 'direct' && !$grounded) || ($answerMode !== 'direct' && $grounded)) {
+            return self::invalid('inconsistent_answer_mode');
+        }
         $sourceNumbers = [];
         foreach ($data['source_numbers'] as $number) {
             if (!is_int($number) && !(is_string($number) && ctype_digit($number))) {
@@ -72,6 +83,7 @@ final class OllamaResponse
         return [
             'valid' => true,
             'grounded' => $grounded,
+            'answer_mode' => $answerMode,
             'confidence' => $confidence,
             'answer' => trim($data['answer']),
             'source_numbers' => $sourceNumbers,
@@ -84,6 +96,7 @@ final class OllamaResponse
         return [
             'valid' => false,
             'grounded' => false,
+            'answer_mode' => 'insufficient',
             'confidence' => 0.0,
             'answer' => '',
             'source_numbers' => [],
