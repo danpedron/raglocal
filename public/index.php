@@ -429,6 +429,70 @@ function ollama_timeout(): int
     return max(20, min(180, $value));
 }
 
+function ollama_generate(string $model, string $prompt, int $maxTokens): array
+{
+    $endpoint = ollama_endpoint();
+    if ($endpoint === '') {
+        return ['response' => [], 'error' => 'ollama_endpoint_not_allowed'];
+    }
+
+    $payload = [
+        'model' => $model,
+        'prompt' => $prompt,
+        'stream' => false,
+        'format' => OllamaResponse::schema(),
+        'think' => false,
+        'keep_alive' => '5m',
+        'options' => [
+            'temperature' => 0.0,
+            'num_predict' => $maxTokens,
+        ],
+    ];
+    $ch = curl_init($endpoint . '/api/generate');
+    $curlOptions = [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_TIMEOUT => ollama_timeout(),
+    ];
+    $sourceIp = ollama_source_ip();
+    if ($sourceIp !== '') {
+        $curlOptions[CURLOPT_INTERFACE] = $sourceIp;
+    }
+    curl_setopt_array($ch, $curlOptions);
+    $raw = curl_exec($ch);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    if ($raw === false || $curlError !== '') {
+        return ['response' => [], 'error' => 'ollama_unreachable'];
+    }
+
+    $response = json_decode($raw, true);
+    if (!is_array($response)) {
+        return ['response' => [], 'error' => 'invalid_ollama_response'];
+    }
+    if (trim((string) ($response['error'] ?? '')) !== '') {
+        return ['response' => [], 'error' => 'ollama_model_error'];
+    }
+    return ['response' => $response, 'error' => ''];
+}
+
+function ollama_retry_prompt(string $question, array $sources): string
+{
+    $evidence = [];
+    foreach (array_slice($sources, 0, 2) as $index => $source) {
+        $content = trim((string) ($source['content'] ?? ''));
+        if (mb_strlen($content, 'UTF-8') > 2400) {
+            $content = rtrim(mb_substr($content, 0, 2400, 'UTF-8')) . '…';
+        }
+        $evidence[] = '[' . ($index + 1) . '] Documento: ' . (string) ($source['title'] ?? 'Fonte sem título') . "\n" . $content;
+    }
+
+    return "Responda à PERGUNTA usando exclusivamente as EVIDÊNCIAS numeradas abaixo. Não explique o processo e não use conhecimento externo. Se uma evidência responder diretamente, grounded deve ser true, confidence deve ficar entre 0.75 e 1.00, answer deve ter uma ou duas frases em português brasileiro e source_numbers deve listar apenas as evidências usadas. Se não houver resposta direta, grounded deve ser false, confidence deve ser 0, answer deve informar que não há base suficiente e source_numbers deve ser []. Retorne somente um objeto JSON com grounded, confidence, answer e source_numbers.\n\nEVIDÊNCIAS:\n" . implode("\n\n", $evidence) . "\n\nPERGUNTA:\n" . $question;
+}
+
 function ollama_call(string $question, array $sources): array
 {
     if (!empty($sources[0]['memory_exact'])) {
@@ -476,49 +540,21 @@ function ollama_call(string $question, array $sources): array
         "Retorne SOMENTE um JSON válido, sem markdown, exatamente com estas chaves: grounded (boolean), confidence (number), answer (string em português brasileiro), source_numbers (array de números).\n\n" .
         "CONTEXTO:\n" . $context . "\n\nPERGUNTA:\n" . $question;
 
-    $payload = [
-        'model' => $model,
-        'prompt' => $prompt,
-        'stream' => false,
-        'format' => OllamaResponse::schema(),
-        'think' => false,
-        'keep_alive' => '5m',
-        'options' => [
-            'temperature' => 0.0,
-            'num_predict' => 260,
-        ],
-    ];
-
-    $endpoint = ollama_endpoint();
-    if ($endpoint === '') {
-        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => 'ollama_endpoint_not_allowed'];
-    }
-    $ch = curl_init($endpoint . '/api/generate');
-    $curlOptions = [
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_CONNECTTIMEOUT => 8,
-        CURLOPT_TIMEOUT => ollama_timeout(),
-    ];
-    $sourceIp = ollama_source_ip();
-    if ($sourceIp !== '') {
-        $curlOptions[CURLOPT_INTERFACE] = $sourceIp;
-    }
-    curl_setopt_array($ch, $curlOptions);
-    $raw = curl_exec($ch);
-    $curlError = curl_error($ch);
-    curl_close($ch);
-
-    if ($raw === false || $curlError !== '') {
-        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => 'ollama_unreachable'];
+    $generated = ollama_generate($model, $prompt, 260);
+    if ($generated['error'] !== '') {
+        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => (string) $generated['error']];
     }
 
-    $response = json_decode($raw, true);
-    $parsed = OllamaResponse::parse(is_array($response) ? $response : [], count($sources));
+    $parsed = OllamaResponse::parse($generated['response'], count($sources));
     if (empty($parsed['valid'])) {
-        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => (string) $parsed['error']];
+        $retry = ollama_generate($model, ollama_retry_prompt($question, $sources), 180);
+        if ($retry['error'] === '') {
+            $parsed = OllamaResponse::parse($retry['response'], count($sources));
+        }
+        if (empty($parsed['valid'])) {
+            $error = $retry['error'] !== '' ? (string) $retry['error'] : 'retry_' . (string) $parsed['error'];
+            return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $error];
+        }
     }
 
     $confidence = (float) $parsed['confidence'];

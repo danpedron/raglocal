@@ -40,7 +40,16 @@ final class OllamaResponse
                 return self::invalid('invalid_contract');
             }
         }
-        if (!is_bool($data['grounded']) || !is_numeric($data['confidence']) || !is_string($data['answer']) || !is_array($data['source_numbers'])) {
+        $grounded = $data['grounded'];
+        if (is_string($grounded)) {
+            $normalizedGrounded = strtolower(trim($grounded));
+            if ($normalizedGrounded === 'true' || $normalizedGrounded === '1') {
+                $grounded = true;
+            } elseif ($normalizedGrounded === 'false' || $normalizedGrounded === '0') {
+                $grounded = false;
+            }
+        }
+        if (!is_bool($grounded) || !is_numeric($data['confidence']) || !is_string($data['answer']) || !is_array($data['source_numbers'])) {
             return self::invalid('invalid_contract');
         }
 
@@ -62,7 +71,7 @@ final class OllamaResponse
 
         return [
             'valid' => true,
-            'grounded' => $data['grounded'],
+            'grounded' => $grounded,
             'confidence' => $confidence,
             'answer' => trim($data['answer']),
             'source_numbers' => $sourceNumbers,

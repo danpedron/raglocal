@@ -20,6 +20,13 @@ assert_same(true, $valid['grounded'], 'A evidência direta deve permanecer funda
 assert_same(0.95, $valid['confidence'], 'A confiança deve ser preservada.');
 assert_same([1], $valid['source_numbers'], 'A fonte citada deve ser preservada.');
 
+$stringBoolean = OllamaResponse::parse([
+    'response' => '{"grounded":"true","confidence":"95","answer":"Laboratório Municipal.","source_numbers":[1]}',
+], 1);
+assert_same(true, $stringBoolean['valid'], 'Representações escalares equivalentes devem ser aceitas.');
+assert_same(true, $stringBoolean['grounded'], 'O booleano textual deve ser normalizado com segurança.');
+assert_same(0.95, $stringBoolean['confidence'], 'A confiança percentual textual deve ser normalizada.');
+
 $debugOutput = OllamaResponse::parse([
     'response' => '{"input":"O que significa FUJAMA?","context":[{"content":"Fundação Jaraguaense de Meio Ambiente - Fujama"}]}',
 ], 1);
