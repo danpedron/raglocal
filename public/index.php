@@ -25,6 +25,7 @@ function load_env(string $file): void
 
 load_env(dirname(__DIR__) . '/config/.env');
 require_once dirname(__DIR__) . '/src/SecretBox.php';
+require_once dirname(__DIR__) . '/src/OllamaResponse.php';
 require_once dirname(__DIR__) . '/src/AiGuidance.php';
 require_once dirname(__DIR__) . '/src/SourceRegistry.php';
 require_once dirname(__DIR__) . '/src/DatabaseTablePlugin.php';
@@ -479,7 +480,7 @@ function ollama_call(string $question, array $sources): array
         'model' => $model,
         'prompt' => $prompt,
         'stream' => false,
-        'format' => 'json',
+        'format' => OllamaResponse::schema(),
         'think' => false,
         'keep_alive' => '5m',
         'options' => [
@@ -515,34 +516,15 @@ function ollama_call(string $question, array $sources): array
     }
 
     $response = json_decode($raw, true);
-    $text = trim((string) ($response['response'] ?? ''));
-    if ($text === '' && !empty($response['thinking'])) {
-        $text = trim((string) $response['thinking']);
-    }
-    $text = preg_replace('/^```(?:json)?\s*|\s*```$/u', '', $text ?? '');
-    $data = json_decode((string) $text, true);
-    if (!is_array($data)) {
-        return ['approved' => false, 'answer' => trim((string) $text), 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => 'invalid_json'];
+    $parsed = OllamaResponse::parse(is_array($response) ? $response : [], count($sources));
+    if (empty($parsed['valid'])) {
+        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => (string) $parsed['error']];
     }
 
-    $rawConfidence = $data['confidence'] ?? 0;
-    if (is_string($rawConfidence)) {
-        $confidence = match (strtolower(trim($rawConfidence))) {
-            'high', 'alta', 'alto' => 0.90,
-            'medium', 'média', 'medio', 'médio' => 0.75,
-            'low', 'baixa', 'baixo' => 0.25,
-            default => (float) $rawConfidence,
-        };
-    } else {
-        $confidence = (float) $rawConfidence;
-    }
-    if ($confidence > 1 && $confidence <= 100) {
-        $confidence /= 100;
-    }
-    $confidence = max(0.0, min(1.0, $confidence));
-    $sourceNumbers = array_values(array_filter(array_map('intval', (array) ($data['source_numbers'] ?? [])), static fn (int $number): bool => $number >= 1 && $number <= count($sources)));
-    $answer = trim((string) ($data['answer'] ?? ''));
-    $grounded = filter_var($data['grounded'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    $confidence = (float) $parsed['confidence'];
+    $sourceNumbers = $parsed['source_numbers'];
+    $answer = (string) $parsed['answer'];
+    $grounded = (bool) $parsed['grounded'];
     $approved = $grounded && $answer !== '' && $confidence >= rag_min_confidence() && count($sourceNumbers) >= rag_min_sources();
 
     return [
