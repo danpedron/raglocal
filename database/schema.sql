@@ -29,13 +29,16 @@ INSERT INTO settings(name, value) VALUES
   ('news_db_password', ''),
   ('news_db_table', 'wp_posts'),
   ('news_post_type', 'pmjs_noticia'),
-  ('news_public_url_template', '')
+  ('news_public_url_template', ''),
+  ('ai_public_intro', 'Consulte o regimento interno e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.'),
+  ('ai_soul', 'Você é o assistente oficial de {empresa}. Atenda em português brasileiro de forma clara, respeitosa, objetiva e acolhedora. Priorize informar com precisão, explicar limites de forma transparente e orientar o usuário ao atendimento humano quando a base não sustentar uma resposta. Preserve neutralidade institucional, não emita julgamentos pessoais e não invente fatos, interpretações, prazos, regras ou decisões.'),
+  ('ai_interpretation_rules', '')
 ON DUPLICATE KEY UPDATE name = VALUES(name);
 
 CREATE TABLE documents (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL,
-  kind ENUM('regimento','ata','memoria','manutencao','noticia') NOT NULL,
+  kind ENUM('regimento','ata','memoria','manutencao','noticia','diretriz') NOT NULL,
   source_filename VARCHAR(255) NULL,
   status ENUM('processing','ready','error') NOT NULL DEFAULT 'processing',
   parser_version VARCHAR(40) NULL,
@@ -152,7 +155,7 @@ CREATE TABLE human_answers (
 
 CREATE TABLE audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored','password_changed','news_sync') NOT NULL,
+  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored','password_changed','news_sync','guidance_updated') NOT NULL,
   actor ENUM('resident','ai','human','admin','system') NOT NULL,
   conversation_id BIGINT UNSIGNED NULL,
   message_id BIGINT UNSIGNED NULL,

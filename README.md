@@ -37,7 +37,9 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_010_ignore_question.sql` | Perguntas ignoradas e resposta padrão fora do contexto |
 | `database/migration_011_secure_admin_password.sql` | Troca obrigatória da senha temporária e auditoria de alteração |
 | `database/migration_012_news_connector.sql` | Tipo Notícias, metadados WordPress e histórico de sincronização |
+| `database/migration_013_ai_guidance.sql` | Diretrizes da IA, orientação pública, identidade e regras interpretativas |
 | `src/NewsConnector.php` | Conector somente leitura, importação incremental e Markdown de notícias |
+| `src/AiGuidance.php` | Validação, Markdown canônico e contexto controlado das diretrizes administrativas |
 | `src/NewsSecrets.php` | Proteção AES-GCM da senha do banco editorial usando `APP_SECRET` |
 | `bin/sync_news.php` | Comando para sincronização manual ou diária via cron |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
@@ -56,7 +58,7 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql` e `database/migration_013_ai_guidance.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
 Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
@@ -75,6 +77,14 @@ Para executar diariamente, configure no servidor uma entrada semelhante à segui
 ```
 
 O usuário do cron precisa ter acesso ao `config/.env`, ao banco local e ao diretório privado `RAG_UPLOAD_DIR`. A conta do banco editorial deve possuir somente `SELECT` na tabela de notícias. O comando registra cada execução em `news_sync_runs` e também na auditoria com o evento `news_sync`.
+
+## Diretrizes administrativas da IA
+
+A seção **Diretrizes da IA** permite personalizar a mensagem inicial exibida no atendimento público, a identidade comportamental do assistente e regras de interpretação. A orientação inicial padrão é: “Consulte o regimento interno e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.” Ela pode ser alterada pelo administrador sem editar código.
+
+A identidade padrão determina que o assistente se comunique em português brasileiro, de forma clara, respeitosa, objetiva e acolhedora, sem inventar fatos e com encaminhamento humano quando a evidência for insuficiente. O marcador `{empresa}` é substituído automaticamente pelo nome definido na identidade da organização.
+
+Regras interpretativas devem ser cadastradas uma por linha no formato `termo => significado`; por exemplo, `SIGLA => Nome completo da organização`. Elas são aplicadas como instruções de interpretação e não como fonte de fatos. Ao salvar, o RAGLocal gera e atualiza exclusivamente o artefato privado `ai-guidance.rag.md`, seus metadados e um evento `guidance_updated` na auditoria. O documento de diretrizes é excluído da busca de evidências para que não possa, sozinho, autorizar uma resposta automática.
 
 ## Fila administrativa e aprendizado controlado
 

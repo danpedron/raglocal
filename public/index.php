@@ -26,6 +26,7 @@ function load_env(string $file): void
 load_env(dirname(__DIR__) . '/config/.env');
 require_once dirname(__DIR__) . '/src/NewsSecrets.php';
 require_once dirname(__DIR__) . '/src/NewsConnector.php';
+require_once dirname(__DIR__) . '/src/AiGuidance.php';
 
 date_default_timezone_set((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Sao_Paulo'));
 
@@ -260,6 +261,20 @@ function news_config(PDO $pdo): array
     return $config;
 }
 
+function ai_guidance(): array
+{
+    static $guidance;
+    if (!is_array($guidance)) {
+        $guidance = AiGuidance::fromSettings(db());
+    }
+    return $guidance;
+}
+
+function ai_public_intro(): string
+{
+    return (string) ai_guidance()['public_intro'];
+}
+
 function brand_name(): string
 {
     $value = trim(setting('brand_name', envv('APP_BRAND_NAME', 'RAGLocal')));
@@ -330,6 +345,7 @@ function document_kind_label(string $kind): string
         'memoria' => 'Memória validada',
         'manutencao' => 'Manutenção',
         'noticia' => 'Notícias',
+        'diretriz' => 'Diretrizes da IA',
         default => $kind,
     };
 }
@@ -389,7 +405,9 @@ function ollama_call(string $question, array $sources): array
     }
     $context = implode("\n\n", $contextParts);
     $model = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
+    $guidance = AiGuidance::promptBlock(ai_guidance(), brand_name());
     $prompt = "Você é o assistente oficial de " . brand_name() . ".\n\n" .
+        $guidance . "\n\n" .
         "Use exclusivamente as fontes numeradas no CONTEXTO. Primeiro compare a pergunta com as fontes. Memórias marcadas como [RAG_MEMORIA_VALIDADA] são respostas humanas aprovadas e podem ser usadas como evidência quando a pergunta atual tiver a mesma intenção, mesmo que esteja formulada com outras palavras. Nesse caso, adapte a redação apenas o necessário e preserve o conteúdo da resposta validada; não acrescente conhecimento geral. " .
         "Se alguma fonte sustentar diretamente a resposta, responda em 1 a 3 frases completas, copiando ou resumindo somente os fatos dessa fonte; inclua o fato principal e a informação complementar mais relevante que esteja na mesma fonte, como serviço realizado, data ou validade. Se a pergunta pedir quando, informe a data e explique a que serviço ou evento ela se refere. Nesse caso, grounded deve ser true, confidence deve ser um número entre 0.75 e 1.00 e source_numbers deve conter todas as fontes usadas. " .
         "Se nenhuma fonte sustentar diretamente a resposta, grounded deve ser false, confidence deve ser 0, source_numbers deve ser [] e answer deve dizer que não encontrou base suficiente. " .
@@ -606,7 +624,7 @@ function context(string $question): array
     $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, dn.public_url, dn.published_at, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
         FROM chunks c JOIN documents d ON d.id = c.document_id
         LEFT JOIN document_news dn ON dn.document_id = d.id AND dn.is_active = 1
-        WHERE d.status = 'ready' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
+        WHERE d.status = 'ready' AND d.kind <> 'diretriz' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
         ORDER BY score DESC, c.id DESC LIMIT 6");
     $stmt->execute([
         'q' => $question,
@@ -1045,6 +1063,33 @@ if ($route === 'news-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POS
     exit;
 }
 
+if ($route === 'guidance-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $pdo = db();
+    try {
+        $guidance = AiGuidance::normalize([
+            'public_intro' => (string) ($_POST['ai_public_intro'] ?? ''),
+            'soul' => (string) ($_POST['ai_soul'] ?? ''),
+            'rules' => (string) ($_POST['ai_interpretation_rules'] ?? ''),
+        ]);
+        $pdo->beginTransaction();
+        $artifact = AiGuidance::synchronize($pdo, $guidance, rag_storage_dir(), brand_name(), (int) ($_SESSION['user']['id'] ?? 0));
+        save_setting('ai_public_intro', $guidance['public_intro']);
+        save_setting('ai_soul', $guidance['soul']);
+        save_setting('ai_interpretation_rules', $guidance['rules']);
+        $pdo->commit();
+        audit_event('guidance_updated', 'admin', ['metadata' => ['updated_by' => (int) ($_SESSION['user']['id'] ?? 0), 'document_id' => $artifact['document_id'], 'rule_count' => $artifact['rule_count'], 'canonical_sha256' => $artifact['canonical_sha256'], 'byte_size' => $artifact['byte_size']]]);
+        flash('Diretrizes da IA salvas e convertidas para memória Markdown controlada.');
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        flash('Não foi possível salvar as diretrizes: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=guidance');
+    exit;
+}
+
 if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $allowedModels = array_keys(ollama_models());
@@ -1228,7 +1273,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'settings', 'news', 'security'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'news', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1245,6 +1290,7 @@ if ($route === 'admin') {
     $currentBrandSubtitle = brand_subtitle();
     $currentLogo = brand_logo_filename();
     $defaultScopeResponse = default_scope_template();
+    $currentGuidance = AiGuidance::fromSettings($pdo);
     $newsConfig = news_config($pdo);
     $newsConnector = new NewsConnector($pdo, $newsConfig);
     $newsStatus = $newsConnector->status();
@@ -1256,7 +1302,7 @@ if ($route === 'admin') {
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('security', 'Segurança') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1267,7 +1313,7 @@ if ($route === 'admin') {
         } else {
             $body .= '<div class="success-alert">Nenhuma pergunta aguarda intervenção humana no momento.</div>';
         }
-        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div></div>';
+        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div></div>';
     } elseif ($section === 'pending') {
         $body .= '<div class="card"><div class="eyebrow">AÇÃO PRIORITÁRIA</div><h3>Intervenção humana necessária</h3><p class="section-intro muted">Responda cada pergunta abaixo para concluir o atendimento. A resposta aprovada será incorporada à memória validada do RAGLocal.</p>';
         if ($pendingCount > 0) {
@@ -1293,6 +1339,9 @@ if ($route === 'admin') {
         $body .= '</tbody></table></div>';
     } elseif ($section === 'branding') {
         $body .= '<div class="card"><h3>Identidade da empresa</h3><p class="muted">Esses dados aparecem no cabeçalho da página pública e do painel.</p><form action="?route=settings" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="chat_model" value="' . h($selectedModel) . '"><input type="hidden" name="min_confidence" value="' . h(number_format($minConfidence, 2, '.', '')) . '"><input type="hidden" name="min_sources" value="' . h((string) $minSources) . '"><input type="hidden" name="timeout" value="' . h((string) $timeout) . '"><label>Nome exibido<input name="brand_name" maxlength="120" value="' . h($currentBrandName) . '" required></label><label>Descrição curta<input name="brand_subtitle" maxlength="240" value="' . h($currentBrandSubtitle) . '"></label><label>Logotipo<input type="file" name="logo" accept="image/png,image/jpeg,image/webp,image/gif"></label><span class="muted">PNG, JPG, WEBP ou GIF, até 2 MB. ' . ($currentLogo !== '' ? 'Logotipo atual: ' . h($currentLogo) . '.' : 'Nenhum logotipo configurado.') . '</span><label><input type="checkbox" name="remove_logo" value="1"> Remover logotipo atual</label><br><button>Salvar identidade</button></form></div>';
+    } elseif ($section === 'guidance') {
+        $ruleExample = "SIGLA => Nome completo da organização";
+        $body .= '<div class="card"><div class="eyebrow">MEMÓRIA CONTROLADA</div><h3>Diretrizes da IA</h3><p class="muted">Defina a orientação mostrada ao público, a identidade comportamental do assistente e regras para interpretar siglas, sinônimos ou termos internos. Ao salvar, o RAGLocal atualiza um Markdown canônico auditável. As regras definem interpretação e tom; elas nunca substituem documentos como evidência factual.</p><form action="?route=guidance-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Mensagem inicial do atendimento público<textarea name="ai_public_intro" maxlength="800" rows="4" required>' . h((string) $currentGuidance['public_intro']) . '</textarea></label><span class="muted">Este é o texto exibido antes do campo de pergunta na página pública.</span><label>Alma da IA<textarea name="ai_soul" maxlength="2400" rows="8" required>' . h((string) $currentGuidance['soul']) . '</textarea></label><span class="muted">Use <code>{empresa}</code> para inserir o nome configurado da organização.</span><label>Regras interpretativas<textarea name="ai_interpretation_rules" maxlength="12000" rows="10" placeholder="' . h($ruleExample) . '">' . h((string) $currentGuidance['rules']) . '</textarea></label><span class="muted">Uma regra por linha no formato <code>termo =&gt; significado</code>. Exemplo: <code>' . h($ruleExample) . '</code>. Linhas iniciadas com <code>#</code> são ignoradas.</span><br><button>Salvar diretrizes e atualizar memória</button></form></div>';
     } elseif ($section === 'settings') {
         $body .= '<div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Endpoint: ' . h(envv('OLLAMA_URL', 'não configurado')) . '. A resposta só é publicada quando há evidência suficiente, fontes válidas e confiança acima do limiar.</p><form action="?route=settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Modelo de chat<select name="chat_model">';
         foreach ($models as $model => $description) {
@@ -1374,4 +1423,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     layout('Resposta', $body);
 }
 
-layout('Atendimento', '<div class="card"><p>Consulte o regimento interno e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.</p><form method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Pergunta<textarea name="question" rows="5" placeholder="Digite sua dúvida..." required></textarea><button>Consultar</button></form></div><p class="muted"><a href="?route=login">Acesso administrativo</a></p>');
+layout('Atendimento', '<div class="card"><p>' . h(ai_public_intro()) . '</p><form method="post"><input type="hidden" name="csrf" value="' . csrf() . '">Pergunta<textarea name="question" rows="5" placeholder="Digite sua dúvida..." required></textarea><button>Consultar</button></form></div><p class="muted"><a href="?route=login">Acesso administrativo</a></p>');
