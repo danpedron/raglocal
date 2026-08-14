@@ -12,7 +12,7 @@ Quando uma nova empresa clona o repositório, basta criar um arquivo `config/.en
 
 ## Princípios de segurança e fundamentação
 
-A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência.
+A aplicação só publica uma resposta automática quando há evidência recuperada da base, fontes citadas e confiança acima do limiar configurado. Quando a evidência é insuficiente, a pergunta é encaminhada para atendimento humano; o rascunho calculado pelo modelo fica disponível no painel administrativo para referência. Se o Ollama estiver indisponível ou exceder o timeout, isso é registrado como falha técnica separada (`ollama_unreachable` ou `ollama_timeout`), a pergunta permanece na fila e a interface informa que o serviço de IA não concluiu o processamento, sem classificar o caso como falta de evidência.
 
 Respostas humanas validadas entram novamente no RAG como memória aprovada. Para coincidência exata, a resposta pode ser reutilizada de forma determinística; para formulações equivalentes, a memória é enviada como contexto confiável ao Ollama, que precisa responder à pergunta atual exclusivamente com base nessa evidência. A equivalência exige cobertura lexical alta e, em caso de empate entre memórias com respostas diferentes, não é aplicada. Assim, o sistema aprende novas evidências sem se transformar em um mecanismo que apenas reproduz respostas humanas ou em um processo de treinamento não auditado.
 

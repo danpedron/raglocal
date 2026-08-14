@@ -364,6 +364,16 @@ function default_scope_response(): string
     return str_replace(['{empresa}', '<nome da empresa>'], brand_name(), default_scope_template());
 }
 
+function ollama_is_unavailable(string $error): bool
+{
+    return in_array($error, ['ollama_endpoint_not_allowed', 'ollama_unreachable', 'ollama_timeout'], true);
+}
+
+function ollama_unavailable_response(): string
+{
+    return 'O serviço de IA está temporariamente indisponível para processar esta pergunta. Ela foi registrada para atendimento humano; tente novamente mais tarde.';
+}
+
 function brand_logo_filename(): string
 {
     $filename = basename(trim(setting('brand_logo_filename', '')));
@@ -466,9 +476,10 @@ function ollama_generate(string $model, string $prompt, int $maxTokens): array
     curl_setopt_array($ch, $curlOptions);
     $raw = curl_exec($ch);
     $curlError = curl_error($ch);
+    $curlErrno = curl_errno($ch);
     curl_close($ch);
     if ($raw === false || $curlError !== '') {
-        return ['response' => [], 'error' => 'ollama_unreachable'];
+        return ['response' => [], 'error' => $curlErrno === CURLE_OPERATION_TIMEDOUT ? 'ollama_timeout' : 'ollama_unreachable'];
     }
 
     $response = json_decode($raw, true);
@@ -827,7 +838,8 @@ function reassess_conversation(PDO $pdo, int $conversationId): array
     $draft = trim((string) ($result['answer'] ?? ''));
     $answerMode = (string) ($result['answer_mode'] ?? ($result['approved'] ? 'direct' : 'insufficient'));
     $approved = !empty($result['approved']);
-    $publicAnswer = $approved || ($answerMode === 'partial' && $draft !== '') ? $draft : default_scope_response();
+    $errorCode = (string) ($result['error'] ?? '');
+    $publicAnswer = $approved || ($answerMode === 'partial' && $draft !== '') ? $draft : (ollama_is_unavailable($errorCode) ? ollama_unavailable_response() : default_scope_response());
     $status = $approved ? 'answered' : 'human_pending';
     $citations = citations_from_result($result, $sources);
 
@@ -1589,7 +1601,7 @@ if ($route === 'admin') {
         FROM documents d
         ORDER BY d.id DESC LIMIT 30")->fetchAll();
     $documentTotal = (int) $pdo->query("SELECT COUNT(*) FROM documents WHERE status = 'ready'")->fetchColumn();
-    $pending = $pdo->query("SELECT c.id, c.ai_draft, c.ai_confidence, c.ai_model, m.body, m.created_at AS question_created_at FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.status = 'human_pending' AND m.sender = 'resident' AND m.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.sender = 'resident') ORDER BY m.created_at DESC, m.id DESC")->fetchAll();
+        $pending = $pdo->query("SELECT c.id, c.ai_draft, c.ai_confidence, c.ai_model, m.body, m.created_at AS question_created_at, (SELECT JSON_UNQUOTE(JSON_EXTRACT(al.metadata, '$.extra.ollama_error')) FROM audit_logs al WHERE al.conversation_id = c.id AND al.event_type = 'ai_answer' ORDER BY al.id DESC LIMIT 1) AS ollama_error FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE c.status = 'human_pending' AND m.sender = 'resident' AND m.id = (SELECT MAX(m2.id) FROM messages m2 WHERE m2.conversation_id = c.id AND m2.sender = 'resident') ORDER BY m.created_at DESC, m.id DESC")->fetchAll();
     $pendingCount = count($pending);
     $models = ollama_models();
     $selectedModel = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
@@ -1640,7 +1652,16 @@ if ($route === 'admin') {
                 $confidence = $item['ai_confidence'] === null ? 'não calculada' : number_format((float) $item['ai_confidence'] * 100, 0, ',', '.') . '%';
                 $questionTime = format_datetime_br((string) $item['question_created_at']);
                 $waiting = waiting_time((string) $item['question_created_at']);
-                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><div class="button-row"><button>Salvar resposta e ensinar a IA</button><button type="submit" formaction="?route=reassess" formmethod="post" formnovalidate class="button-secondary">Reavaliar com a base atualizada</button><button type="submit" formaction="?route=ignore" formmethod="post" formnovalidate class="button-secondary">Ignorar sem responder</button></div></form>';
+                $draftText = trim((string) ($item['ai_draft'] ?? ''));
+                $ollamaError = (string) ($item['ollama_error'] ?? '');
+                if ($draftText === '' && $ollamaError === 'ollama_timeout') {
+                    $draftText = 'O Ollama excedeu o tempo limite antes de produzir um rascunho. Verifique a disponibilidade do servidor de IA ou tente reavaliar mais tarde.';
+                } elseif ($draftText === '' && ollama_is_unavailable($ollamaError)) {
+                    $draftText = 'O servidor Ollama estava indisponível quando a pergunta foi processada. Verifique a conectividade antes de reavaliar.';
+                } elseif ($draftText === '') {
+                    $draftText = 'O modelo não produziu uma resposta estruturada.';
+                }
+                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h($draftText) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><div class="button-row"><button>Salvar resposta e ensinar a IA</button><button type="submit" formaction="?route=reassess" formmethod="post" formnovalidate class="button-secondary">Reavaliar com a base atualizada</button><button type="submit" formaction="?route=ignore" formmethod="post" formnovalidate class="button-secondary">Ignorar sem responder</button></div></form>';
             }
         } else {
             $body .= '<div class="empty-state">A fila está vazia. Quando uma pergunta não tiver evidência suficiente, ela aparecerá aqui com destaque.</div>';
@@ -1758,11 +1779,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $responseTimeMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
     $reference = $result['answer'];
     $answerMode = (string) ($result['answer_mode'] ?? ($result['approved'] ? 'direct' : 'insufficient'));
+    $errorCode = (string) ($result['error'] ?? '');
     if ($result['approved']) {
         $publicAnswer = $result['answer'];
         $status = 'answered';
     } elseif ($answerMode === 'partial' && $result['answer'] !== '') {
         $publicAnswer = $result['answer'];
+        $status = 'human_pending';
+    } elseif (ollama_is_unavailable($errorCode)) {
+        $publicAnswer = ollama_unavailable_response();
         $status = 'human_pending';
     } else {
         $publicAnswer = default_scope_response();
