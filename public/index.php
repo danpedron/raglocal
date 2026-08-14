@@ -493,8 +493,21 @@ function ollama_retry_prompt(string $question, array $sources): string
 
     return "Responda à PERGUNTA usando exclusivamente as EVIDÊNCIAS numeradas abaixo. Não explique o processo e não use conhecimento externo.\n\n" .
         "Use answer_mode=direct e grounded=true somente quando as evidências responderem diretamente ao objeto específico perguntado; confidence deve ficar entre 0.75 e 1.00. " .
-        "Use answer_mode=partial e grounded=false quando as evidências confirmarem apenas uma parte ou uma categoria mais ampla da pergunta. Nesse caso, answer deve primeiro informar o que a base confirma e depois dizer explicitamente que a base consultada não confirma o item específico pedido, encaminhando essa confirmação para atendimento humano. Não transforme vacinação em confirmação de vacina contra dengue, nem menção a suspeita de dengue em evidência de vacina. Confidence deve ficar entre 0.55 e 0.74. " .
+        "Use answer_mode=partial e grounded=false quando as evidências confirmarem apenas uma parte ou uma categoria mais ampla da pergunta. Nesse caso, answer deve primeiro informar o que a base confirma e depois dizer explicitamente que a base consultada não confirma o item específico pedido, encaminhando essa confirmação para atendimento humano. Não transforme vacinação em confirmação de vacina contra dengue, nem menção a suspeita de dengue em evidência de vacina. Confidence deve ficar entre 0.50 e 0.74. " .
         "Use answer_mode=insufficient e grounded=false, confidence=0 e source_numbers=[] somente quando não houver nenhuma evidência útil relacionada. Em direct ou partial, cite somente as evidências realmente usadas. Retorne somente um objeto JSON com grounded, answer_mode, confidence, answer e source_numbers.\n\nEVIDÊNCIAS:\n" . implode("\n\n", $evidence) . "\n\nPERGUNTA:\n" . $question;
+}
+
+function ensure_partial_boundary(string $answer): string
+{
+    $answer = trim($answer);
+    if ($answer === '') {
+        return '';
+    }
+    $normalized = mb_strtolower($answer, 'UTF-8');
+    if (preg_match('/não confirma|nao confirma|não informa|nao informa|atendimento humano|confirmação humana|confirmacao humana/u', $normalized) === 1) {
+        return $answer;
+    }
+    return rtrim($answer, " \\t\\r\\n.!") . '. A base consultada não confirma o item específico da pergunta; essa parte precisa ser confirmada por atendimento humano.';
 }
 
 function ollama_call(string $question, array $sources): array
@@ -573,11 +586,14 @@ function ollama_call(string $question, array $sources): array
     $grounded = (bool) $parsed['grounded'];
     $answerMode = (string) ($parsed['answer_mode'] ?? ($grounded ? 'direct' : 'insufficient'));
     $approved = $answerMode === 'direct' && $grounded && $answer !== '' && $confidence >= rag_min_confidence() && count($sourceNumbers) >= rag_min_sources();
-    if ($answerMode === 'partial' && ($answer === '' || $confidence < 0.55 || count($sourceNumbers) < 1)) {
+    if ($answerMode === 'partial' && ($answer === '' || $confidence < 0.50 || count($sourceNumbers) < 1)) {
         $answerMode = 'insufficient';
         $answer = '';
         $confidence = 0.0;
         $sourceNumbers = [];
+    } elseif ($answerMode === 'partial') {
+        $confidence = min(0.74, $confidence);
+        $answer = ensure_partial_boundary($answer);
     }
 
     return [
