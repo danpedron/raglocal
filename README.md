@@ -35,6 +35,7 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_008_branding.sql` | Nome, subtítulo e logotipo configuráveis |
 | `database/migration_009_markdown_only.sql` | Remoção de artefatos originais e retenção exclusiva do Markdown |
 | `database/migration_010_ignore_question.sql` | Perguntas ignoradas e resposta padrão fora do contexto |
+| `database/migration_011_secure_admin_password.sql` | Troca obrigatória da senha temporária e auditoria de alteração |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |
@@ -51,9 +52,9 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem. Crie o administrador com `bin/bootstrap_admin.php`, informando opcionalmente o nome da pessoa ou equipe administradora como sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_011_secure_admin_password.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
-Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
+Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
 ## Fila administrativa e aprendizado controlado
 

@@ -904,7 +904,7 @@ if ($route === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         session_regenerate_id(true);
         $_SESSION['user'] = $user;
         audit_event('login_success', 'admin', ['metadata' => ['user_id' => (int) $user['id'], 'role' => (string) $user['role']]]);
-        header('Location: ?route=admin');
+        header('Location: ?route=' . (!empty($user['must_change_password']) ? 'password' : 'admin'));
         exit;
     }
     audit_event('login_failure', 'admin', ['metadata' => ['email_hash' => hash('sha256', strtolower(trim((string) ($_POST['email'] ?? ''))))]]);
@@ -913,6 +913,49 @@ if ($route === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
 if ($route === 'login') {
     layout('Login', '<div class="card"><h2>Acesso administrativo</h2>' . (!empty($error) ? '<p>' . h($error) . '</p>' : '') . '<form method="post"><input type="hidden" name="csrf" value="' . csrf() . '">E-mail<input name="email" type="email" required>Senha<input name="password" type="password" required><button>Entrar</button></form></div>');
+}
+
+if ($route === 'password' && !admin()) {
+    header('Location: ?route=login');
+    exit;
+}
+
+$passwordError = '';
+if ($route === 'password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $currentPassword = (string) ($_POST['current_password'] ?? '');
+    $newPassword = (string) ($_POST['new_password'] ?? '');
+    $confirmPassword = (string) ($_POST['confirm_password'] ?? '');
+    if (strlen($newPassword) < 12 || strlen($newPassword) > 255) {
+        $passwordError = 'A nova senha deve ter entre 12 e 255 caracteres.';
+    } elseif ($newPassword !== $confirmPassword) {
+        $passwordError = 'A confirmação da nova senha não coincide.';
+    } else {
+        $stmt = db()->prepare('SELECT password_hash FROM users WHERE id = ? LIMIT 1');
+        $stmt->execute([(int) $_SESSION['user']['id']]);
+        $account = $stmt->fetch();
+        if (!$account || !password_verify($currentPassword, (string) $account['password_hash'])) {
+            $passwordError = 'A senha atual está incorreta.';
+        } else {
+            $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
+            db()->prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?')->execute([$newHash, (int) $_SESSION['user']['id']]);
+            $_SESSION['user']['password_hash'] = $newHash;
+            $_SESSION['user']['must_change_password'] = 0;
+            audit_event('password_changed', 'admin', ['metadata' => ['user_id' => (int) $_SESSION['user']['id']]]);
+            flash('Senha alterada com sucesso.');
+            header('Location: ?route=admin&section=security');
+            exit;
+        }
+    }
+}
+
+if (admin() && !empty($_SESSION['user']['must_change_password']) && $route !== 'password' && $route !== 'logout') {
+    header('Location: ?route=password');
+    exit;
+}
+
+if ($route === 'password') {
+    layout('Alterar senha', '<div class="card"><div class="eyebrow">SEGURANÇA</div><h2>Alterar senha administrativa</h2><p class="muted">Por segurança, a senha temporária deve ser substituída antes de acessar o painel.</p>' . ($passwordError !== '' ? '<div class="urgent-alert">' . h($passwordError) . '</div>' : '') . '<form method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Senha atual<input name="current_password" type="password" autocomplete="current-password" required></label><label>Nova senha<input name="new_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><label>Confirme a nova senha<input name="confirm_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><button>Alterar senha</button></form><p class="muted">Use pelo menos 12 caracteres e não reutilize a senha temporária.</p></div>');
 }
 
 if ($route === 'admin' && !admin()) {
@@ -1103,7 +1146,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'settings'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'settings', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1126,7 +1169,7 @@ if ($route === 'admin') {
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('settings', 'Confiabilidade e Ollama') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1169,6 +1212,8 @@ if ($route === 'admin') {
             $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
         }
         $body .= '</select></label><label>Limiar mínimo de confiança (0,50 a 0,99)<input name="min_confidence" type="number" min="0.50" max="0.99" step="0.01" value="' . h(number_format($minConfidence, 2, '.', '')) . '"></label><label>Fontes mínimas citadas<input name="min_sources" type="number" min="1" max="3" step="1" value="' . h((string) $minSources) . '"></label><label>Tempo máximo de consulta (segundos)<input name="timeout" type="number" min="20" max="180" step="5" value="' . h((string) $timeout) . '"></label><label>Resposta padrão para perguntas fora do contexto<textarea name="default_scope_response" maxlength="500" rows="4">' . h($defaultScopeResponse) . '</textarea><span class="muted">Use <code>{empresa}</code> para inserir automaticamente o nome configurado da empresa.</span><button>Salvar configurações</button></form><p class="muted">Para hardware limitado, comece com <b>qwen3:4b</b>, já instalado, e limiar 0,75. Modelos de 1B são alternativas mais leves, mas precisam ser instalados no servidor Ollama antes do uso.</p></div>';
+    } elseif ($section === 'security') {
+        $body .= '<div class="card"><div class="eyebrow">SEGURANÇA DA CONTA</div><h3>Alterar senha administrativa</h3><p class="muted">Troque sua senha a qualquer momento. A senha atual é exigida e a nova senha deve ter entre 12 e 255 caracteres.</p><form action="?route=password" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Senha atual<input name="current_password" type="password" autocomplete="current-password" required></label><label>Nova senha<input name="new_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><label>Confirme a nova senha<input name="confirm_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><button>Alterar senha</button></form></div>';
     }
     $body .= '</div>';
     layout('Administração', $body);

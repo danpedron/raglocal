@@ -4,6 +4,7 @@ CREATE TABLE users (
   email VARCHAR(190) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   role ENUM('admin','attendant') NOT NULL DEFAULT 'attendant',
+  must_change_password TINYINT(1) NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -100,7 +101,7 @@ CREATE TABLE human_answers (
 
 CREATE TABLE audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored') NOT NULL,
+  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored','password_changed') NOT NULL,
   actor ENUM('resident','ai','human','admin','system') NOT NULL,
   conversation_id BIGINT UNSIGNED NULL,
   message_id BIGINT UNSIGNED NULL,
