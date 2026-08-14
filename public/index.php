@@ -541,20 +541,21 @@ function ollama_call(string $question, array $sources): array
         "CONTEXTO:\n" . $context . "\n\nPERGUNTA:\n" . $question;
 
     $generated = ollama_generate($model, $prompt, 260);
-    if ($generated['error'] !== '') {
-        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => (string) $generated['error']];
-    }
-
-    $parsed = OllamaResponse::parse($generated['response'], count($sources));
-    if (empty($parsed['valid'])) {
+    $initialError = (string) $generated['error'];
+    $parsed = $initialError === '' ? OllamaResponse::parse($generated['response'], count($sources)) : null;
+    $retryableErrors = ['ollama_model_error', 'invalid_ollama_response'];
+    $shouldRetry = $initialError === '' ? empty($parsed['valid']) : in_array($initialError, $retryableErrors, true);
+    if ($shouldRetry) {
         $retry = ollama_generate($model, ollama_retry_prompt($question, $sources), 180);
         if ($retry['error'] === '') {
             $parsed = OllamaResponse::parse($retry['response'], count($sources));
         }
         if (empty($parsed['valid'])) {
-            $error = $retry['error'] !== '' ? (string) $retry['error'] : 'retry_' . (string) $parsed['error'];
+            $error = $retry['error'] !== '' ? (string) $retry['error'] : 'retry_' . (string) ($parsed['error'] ?? $initialError);
             return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $error];
         }
+    } elseif ($initialError !== '') {
+        return ['approved' => false, 'answer' => '', 'confidence' => 0.0, 'source_numbers' => [], 'model' => $model, 'error' => $initialError];
     }
 
     $confidence = (float) $parsed['confidence'];
