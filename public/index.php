@@ -1468,7 +1468,7 @@ if ($route === 'document-delete' && admin() && $_SERVER['REQUEST_METHOD'] === 'P
     $documentId = (int) ($_POST['document_id'] ?? 0);
     try {
         $deleted = SourceRegistry::deleteManualDocument(db(), $documentId);
-        audit_event('document_deleted', 'admin', ['metadata' => [
+        audit_event('document_removed', 'admin', ['metadata' => [
             'document_id' => $documentId,
             'title' => $deleted['title'],
             'kind' => $deleted['kind'],
