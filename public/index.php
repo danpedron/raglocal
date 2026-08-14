@@ -24,10 +24,10 @@ function load_env(string $file): void
 }
 
 load_env(dirname(__DIR__) . '/config/.env');
-require_once dirname(__DIR__) . '/src/NewsSecrets.php';
-require_once dirname(__DIR__) . '/src/NewsConnector.php';
-require_once dirname(__DIR__) . '/src/ServiceConnector.php';
+require_once dirname(__DIR__) . '/src/SecretBox.php';
 require_once dirname(__DIR__) . '/src/AiGuidance.php';
+require_once dirname(__DIR__) . '/src/SourceRegistry.php';
+require_once dirname(__DIR__) . '/src/DatabaseTablePlugin.php';
 
 date_default_timezone_set((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Sao_Paulo'));
 
@@ -255,11 +255,69 @@ function save_setting(string $key, string $value): void
     $stmt->execute([$key, $value]);
 }
 
-function news_config(PDO $pdo): array
+function source_config(PDO $pdo, int $sourceId): array
 {
-    $config = NewsConnector::configFromSettings($pdo);
-    $config['password'] = NewsSecrets::decrypt((string) ($config['password'] ?? ''), envv('APP_SECRET'));
-    return $config;
+    $source = SourceRegistry::find($pdo, $sourceId);
+    if (!$source) {
+        throw new InvalidArgumentException('Fonte não encontrada.');
+    }
+    return SourceRegistry::publicConfig($source);
+}
+
+function source_plugin(PDO $pdo, int $sourceId): array
+{
+    $source = SourceRegistry::find($pdo, $sourceId);
+    if (!$source) {
+        throw new InvalidArgumentException('Fonte não encontrada.');
+    }
+    return [$source, (string) $source['plugin_key']];
+}
+
+function source_sync(PDO $pdo, int $sourceId, string $trigger = 'manual'): array
+{
+    [$source, $pluginKey] = source_plugin($pdo, $sourceId);
+    $definition = SourceRegistry::plugins()[$pluginKey] ?? null;
+    if (!is_array($definition) || empty($definition['syncable'])) {
+        throw new InvalidArgumentException('Este plugin não possui sincronização disponível.');
+    }
+    return SourceRegistry::executor($pdo, $source)->sync($trigger);
+}
+
+function source_last_run(PDO $pdo, int $sourceId): ?array
+{
+    $stmt = $pdo->prepare('SELECT * FROM source_sync_runs WHERE source_id = ? ORDER BY id DESC LIMIT 1');
+    $stmt->execute([$sourceId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    return $row ?: null;
+}
+
+function source_document_count(PDO $pdo, int $sourceId): int
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*) FROM document_source_links WHERE source_id = ? AND is_active = 1');
+    $stmt->execute([$sourceId]);
+    return (int) $stmt->fetchColumn();
+}
+
+function source_form_html(array $source, array $config, string $csrfToken): string
+{
+    $sourceId = (int) ($source['id'] ?? 0);
+    $sourceKey = (string) ($source['source_key'] ?? '');
+    $pluginKey = (string) ($source['plugin_key'] ?? 'database_table');
+    $name = (string) ($source['name'] ?? '');
+    $description = (string) ($source['description'] ?? '');
+    $contentColumns = is_array($config['content_columns'] ?? null) ? implode(', ', $config['content_columns']) : (string) ($config['content_columns'] ?? '');
+    $checked = !empty($config['withdraw_missing']) ? ' checked' : '';
+    $passwordStatus = !empty($config['password_enc']) ? 'Senha protegida já cadastrada; deixe em branco para mantê-la.' : 'Nenhuma senha cadastrada.';
+    $pluginDefinitions = SourceRegistry::plugins();
+    $pluginOptions = '';
+    foreach ($pluginDefinitions as $availableKey => $availablePlugin) {
+        if (empty($availablePlugin['syncable']) && $availableKey !== $pluginKey) {
+            continue;
+        }
+        $pluginOptions .= '<option value="' . h((string) $availableKey) . '"' . ($pluginKey === (string) $availableKey ? ' selected' : '') . '>' . h((string) ($availablePlugin['label'] ?? $availableKey)) . '</option>';
+    }
+    $selectedPluginDescription = is_array($pluginDefinitions[$pluginKey] ?? null) ? (string) ($pluginDefinitions[$pluginKey]['description'] ?? '') : '';
+    return '<div class="card"><div class="eyebrow">PLUGIN ATIVÁVEL</div><h3>' . ($sourceId > 0 ? 'Editar fonte' : 'Adicionar fonte') . '</h3><p class="muted">Uma fonte é uma instância configurada de um plugin. O plugin atual lê uma tabela MariaDB externa e transforma os registros em documentos RAG. O núcleo não precisa saber se os registros são notícias, pesquisas, produtos, estoque ou outro domínio.</p><form action="?route=source-save" method="post"><input type="hidden" name="csrf" value="' . h($csrfToken) . '"><input type="hidden" name="source_id" value="' . $sourceId . '"><label>Chave interna<input name="source_key" maxlength="120" pattern="[A-Za-z0-9._-]+" value="' . h($sourceKey) . '" placeholder="ex.: catalogo-produtos" required></label><label>Plugin<select name="plugin_key">' . $pluginOptions . '</select></label><span class="muted">' . h($selectedPluginDescription) . '</span><label>Nome da fonte<input name="source_name" maxlength="255" value="' . h($name) . '" placeholder="ex.: Catálogo de produtos" required></label><label>Descrição curta<textarea name="source_description" maxlength="2000" rows="2">' . h($description) . '</textarea></label><div class="grid"><div><label>Servidor<input name="source_host" maxlength="255" value="' . h((string) ($config['host'] ?? '')) . '" required></label></div><div><label>Porta<input name="source_port" type="number" min="1" max="65535" value="' . h((string) ($config['port'] ?? 3306)) . '" required></label></div></div><div class="grid"><div><label>Banco de dados<input name="source_database" maxlength="190" value="' . h((string) ($config['database'] ?? '')) . '" required></label></div><div><label>Usuário somente leitura<input name="source_user" maxlength="190" value="' . h((string) ($config['user'] ?? '')) . '" required></label></div></div><label>Senha do banco externo<input name="source_password" type="password" autocomplete="new-password"><span class="muted">' . h($passwordStatus) . '</span></label>' . ($sourceId > 0 && !empty($config['password_enc']) ? '<label><input type="checkbox" name="source_remove_password" value="1"> Remover a senha armazenada</label>' : '') . '<div class="grid"><div><label>Tabela<input name="source_table" maxlength="120" value="' . h((string) ($config['table'] ?? '')) . '" placeholder="ex.: wp_posts" required></label></div><div><label>Coluna-chave<input name="source_key_column" maxlength="120" value="' . h((string) ($config['key_column'] ?? 'id')) . '" required></label></div></div><label>Coluna do título<input name="source_title_column" maxlength="120" value="' . h((string) ($config['title_column'] ?? 'title')) . '" required></label><label>Colunas de conteúdo<input name="source_content_columns" maxlength="1000" value="' . h($contentColumns) . '" placeholder="titulo, resumo, conteudo" required></label><span class="muted">Separe várias colunas por vírgula. O conteúdo será combinado em um Markdown canônico.</span><div class="grid"><div><label>Coluna de filtro opcional<input name="source_filter_column" maxlength="120" value="' . h((string) ($config['filter_column'] ?? '')) . '" placeholder="ex.: post_type"></label></div><div><label>Valor do filtro<input name="source_filter_value" maxlength="255" value="' . h((string) ($config['filter_value'] ?? '')) . '" placeholder="ex.: produto"></label></div></div><div class="grid"><div><label>Coluna de status opcional<input name="source_status_column" maxlength="120" value="' . h((string) ($config['status_column'] ?? '')) . '" placeholder="ex.: status"></label></div><div><label>Status publicado/ativo<input name="source_status_value" maxlength="255" value="' . h((string) ($config['status_value'] ?? '')) . '" placeholder="ex.: ativo"></label></div></div><div class="grid"><div><label>Coluna de publicação/data<input name="source_published_column" maxlength="120" value="' . h((string) ($config['published_column'] ?? '')) . '" placeholder="ex.: published_at"></label></div><div><label>Coluna de alteração<input name="source_modified_column" maxlength="120" value="' . h((string) ($config['modified_column'] ?? '')) . '" placeholder="ex.: updated_at"></label></div></div><div class="grid"><div><label>Coluna de URL pública<input name="source_url_column" maxlength="120" value="' . h((string) ($config['url_column'] ?? '')) . '" placeholder="ex.: url"></label></div><div><label>Modelo de URL pública<input name="source_public_url_template" maxlength="2048" value="' . h((string) ($config['public_url_template'] ?? '')) . '" placeholder="https://site.exemplo/item/{id}"></label></div></div><span class="muted">A URL pode vir de uma coluna ou de um modelo com <code>{id}</code>. A senha nunca é exibida nem gravada em texto puro.</span><label><input type="checkbox" name="source_withdraw_missing" value="1"' . $checked . '> Retirar itens ausentes na próxima sincronização</label><br><button>Salvar fonte</button></form></div>';
 }
 
 function ai_guidance(): array
@@ -624,14 +682,17 @@ function context(string $question): array
     }
 
     $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind,
-            COALESCE(dn.public_url, ds.public_url, ds.source_page_url) AS public_url,
-            dn.published_at,
-            ds.department AS service_department,
+            dsl.public_url,
+            NULL AS published_at,
+            NULL AS service_department,
             MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
-        FROM chunks c JOIN documents d ON d.id = c.document_id
-        LEFT JOIN document_news dn ON dn.document_id = d.id AND dn.is_active = 1
-        LEFT JOIN document_services ds ON ds.document_id = d.id AND ds.is_active = 1
-        WHERE d.status = 'ready' AND d.kind <> 'diretriz' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        LEFT JOIN document_source_links dsl ON dsl.document_id = d.id AND dsl.is_active = 1
+        LEFT JOIN knowledge_sources ks ON ks.id = dsl.source_id AND ks.enabled = 1
+        WHERE d.status = 'ready' AND d.kind <> 'diretriz'
+          AND (dsl.id IS NULL OR ks.id IS NOT NULL)
+          AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
         ORDER BY score DESC, c.id DESC LIMIT 6");
     $stmt->execute([
         'q' => $question,
@@ -1089,118 +1150,102 @@ if ($route === 'admin' && !admin()) {
     exit;
 }
 
-if ($route === 'news-sync' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($route === 'source-save' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     try {
         $pdo = db();
-        $news = new NewsConnector($pdo, news_config($pdo));
-        $summary = $news->sync('manual');
-        audit_event('news_sync', 'admin', ['metadata' => ['trigger' => 'manual', 'status' => $summary['status'], 'read_count' => $summary['read_count'], 'imported_count' => $summary['imported_count'], 'updated_count' => $summary['updated_count'], 'unchanged_count' => $summary['unchanged_count'], 'withdrawn_count' => $summary['withdrawn_count'], 'error_count' => $summary['error_count']]]);
+        $sourceId = (int) ($_POST['source_id'] ?? 0);
+        $existingConfig = [];
+        if ($sourceId > 0) {
+            $existing = SourceRegistry::find($pdo, $sourceId);
+            if (!$existing) {
+                throw new InvalidArgumentException('Fonte não encontrada.');
+            }
+            $existingConfig = SourceRegistry::publicConfig($existing);
+        }
+        $config = [
+            'host' => trim((string) ($_POST['source_host'] ?? ($existingConfig['host'] ?? ''))),
+            'port' => (int) ($_POST['source_port'] ?? ($existingConfig['port'] ?? 3306)),
+            'database' => trim((string) ($_POST['source_database'] ?? ($existingConfig['database'] ?? ''))),
+            'user' => trim((string) ($_POST['source_user'] ?? ($existingConfig['user'] ?? ''))),
+            'password_enc' => (string) ($existingConfig['password_enc'] ?? ''),
+            'password_plain' => (string) ($_POST['source_password'] ?? ''),
+            'table' => trim((string) ($_POST['source_table'] ?? ($existingConfig['table'] ?? ''))),
+            'key_column' => trim((string) ($_POST['source_key_column'] ?? ($existingConfig['key_column'] ?? 'id'))),
+            'title_column' => trim((string) ($_POST['source_title_column'] ?? ($existingConfig['title_column'] ?? 'title'))),
+            'content_columns' => trim((string) ($_POST['source_content_columns'] ?? implode(', ', (array) ($existingConfig['content_columns'] ?? [])))),
+            'filter_column' => trim((string) ($_POST['source_filter_column'] ?? ($existingConfig['filter_column'] ?? ''))),
+            'filter_value' => (string) ($_POST['source_filter_value'] ?? ($existingConfig['filter_value'] ?? '')),
+            'status_column' => trim((string) ($_POST['source_status_column'] ?? ($existingConfig['status_column'] ?? ''))),
+            'status_value' => (string) ($_POST['source_status_value'] ?? ($existingConfig['status_value'] ?? '')),
+            'published_column' => trim((string) ($_POST['source_published_column'] ?? ($existingConfig['published_column'] ?? ''))),
+            'modified_column' => trim((string) ($_POST['source_modified_column'] ?? ($existingConfig['modified_column'] ?? ''))),
+            'url_column' => trim((string) ($_POST['source_url_column'] ?? ($existingConfig['url_column'] ?? ''))),
+            'public_url_template' => trim((string) ($_POST['source_public_url_template'] ?? ($existingConfig['public_url_template'] ?? ''))),
+            'withdraw_missing' => !empty($_POST['source_withdraw_missing']),
+        ];
+        if (!empty($_POST['source_remove_password'])) {
+            $config['password_enc'] = '';
+        }
+        $savedId = SourceRegistry::save($pdo, [
+            'source_key' => (string) ($_POST['source_key'] ?? ''),
+            'plugin_key' => (string) ($_POST['plugin_key'] ?? 'database_table'),
+            'name' => (string) ($_POST['source_name'] ?? ''),
+            'description' => (string) ($_POST['source_description'] ?? ''),
+            'config' => $config,
+        ], $sourceId > 0 ? $sourceId : null, (int) ($_SESSION['user']['id'] ?? 0));
+        audit_event($sourceId > 0 ? 'source_updated' : 'source_created', 'admin', ['metadata' => ['source_id' => $savedId, 'plugin_key' => (string) ($_POST['plugin_key'] ?? 'database_table'), 'updated_by' => (int) ($_SESSION['user']['id'] ?? 0)]]);
+        flash($sourceId > 0 ? 'Fonte atualizada.' : 'Fonte criada e ativada.');
+    } catch (Throwable $error) {
+        flash('Não foi possível salvar a fonte: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=sources');
+    exit;
+}
+
+if ($route === 'source-toggle' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $sourceId = (int) ($_POST['source_id'] ?? 0);
+    try {
+        $enabled = SourceRegistry::toggle(db(), $sourceId);
+        audit_event($enabled ? 'source_enabled' : 'source_disabled', 'admin', ['metadata' => ['source_id' => $sourceId, 'updated_by' => (int) ($_SESSION['user']['id'] ?? 0)]]);
+        flash($enabled ? 'Fonte ativada.' : 'Fonte desativada. Os documentos derivados não serão usados na recuperação.');
+    } catch (Throwable $error) {
+        flash('Não foi possível alterar o estado da fonte: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=sources');
+    exit;
+}
+
+if ($route === 'source-remove' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $sourceId = (int) ($_POST['source_id'] ?? 0);
+    try {
+        if (($_POST['confirm_remove'] ?? '') !== 'REMOVE') {
+            throw new InvalidArgumentException('Digite REMOVE para confirmar a exclusão da fonte e dos documentos derivados.');
+        }
+        $removed = SourceRegistry::remove(db(), $sourceId);
+        audit_event('source_removed', 'admin', ['metadata' => ['source_id' => $sourceId, 'name' => $removed['name'], 'document_count' => $removed['document_count'], 'removed_by' => (int) ($_SESSION['user']['id'] ?? 0)]]);
+        flash('Fonte removida com ' . $removed['document_count'] . ' documento(s) derivado(s).');
+    } catch (Throwable $error) {
+        flash('Não foi possível remover a fonte: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=sources');
+    exit;
+}
+
+if ($route === 'source-sync' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $sourceId = (int) ($_POST['source_id'] ?? 0);
+    try {
+        $summary = source_sync(db(), $sourceId, 'manual');
+        audit_event('source_sync', 'admin', ['metadata' => ['source_id' => $sourceId, 'trigger' => 'manual', 'status' => $summary['status'], 'read_count' => $summary['read_count'], 'imported_count' => $summary['imported_count'], 'updated_count' => $summary['updated_count'], 'unchanged_count' => $summary['unchanged_count'], 'withdrawn_count' => $summary['withdrawn_count'], 'error_count' => $summary['error_count']]]);
         flash('Sincronização concluída: ' . $summary['imported_count'] . ' novas, ' . $summary['updated_count'] . ' atualizadas, ' . $summary['unchanged_count'] . ' sem alteração e ' . $summary['withdrawn_count'] . ' retiradas.');
     } catch (Throwable $error) {
-        audit_event('news_sync', 'admin', ['metadata' => ['trigger' => 'manual', 'status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8')]]);
-        flash('A sincronização não foi concluída: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+        audit_event('source_sync', 'admin', ['metadata' => ['source_id' => $sourceId, 'trigger' => 'manual', 'status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8')]]);
+        flash('Não foi possível sincronizar a fonte: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
     }
-    header('Location: ?route=admin&section=news');
-    exit;
-}
-
-if ($route === 'news-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    check_csrf();
-    try {
-        $pdo = db();
-        $host = trim((string) ($_POST['news_db_host'] ?? ''));
-        $port = (int) ($_POST['news_db_port'] ?? 3306);
-        $database = trim((string) ($_POST['news_db_name'] ?? ''));
-        $user = trim((string) ($_POST['news_db_user'] ?? ''));
-        $table = trim((string) ($_POST['news_db_table'] ?? 'wp_posts'));
-        $postType = trim((string) ($_POST['news_post_type'] ?? 'pmjs_noticia'));
-        $template = trim((string) ($_POST['news_public_url_template'] ?? ''));
-        if ($host === '' || preg_match('/[\\x00-\\x20]/', $host) === 1 || mb_strlen($host, 'UTF-8') > 255) {
-            throw new InvalidArgumentException('Informe um servidor editorial válido.');
-        }
-        if ($port < 1 || $port > 65535) {
-            throw new InvalidArgumentException('A porta deve estar entre 1 e 65535.');
-        }
-        if ($database === '' || $user === '') {
-            throw new InvalidArgumentException('Informe o nome do banco e o usuário de leitura.');
-        }
-        if (preg_match('/^[A-Za-z0-9_]+$/', $table) !== 1) {
-            throw new InvalidArgumentException('O nome da tabela deve conter somente letras, números e sublinhado.');
-        }
-        if (preg_match('/^[A-Za-z0-9_.-]+$/', $postType) !== 1) {
-            throw new InvalidArgumentException('O post_type informado é inválido.');
-        }
-        if ($template !== '' && (mb_strlen($template, 'UTF-8') > 2048 || preg_match('#^https?://#i', $template) !== 1)) {
-            throw new InvalidArgumentException('O modelo de URL deve começar com http:// ou https://. Use {id}, {slug} ou {guid}.');
-        }
-        $storedPassword = setting('news_db_password', '');
-        $newPassword = (string) ($_POST['news_db_password'] ?? '');
-        if (!empty($_POST['news_remove_password'])) {
-            $storedPassword = '';
-        } elseif ($newPassword !== '') {
-            $storedPassword = NewsSecrets::encrypt($newPassword, envv('APP_SECRET'));
-        }
-        save_setting('news_enabled', !empty($_POST['news_enabled']) ? '1' : '0');
-        save_setting('news_db_host', mb_substr($host, 0, 255, 'UTF-8'));
-        save_setting('news_db_port', (string) $port);
-        save_setting('news_db_name', mb_substr($database, 0, 190, 'UTF-8'));
-        save_setting('news_db_user', mb_substr($user, 0, 190, 'UTF-8'));
-        save_setting('news_db_password', $storedPassword);
-        save_setting('news_db_table', $table);
-        save_setting('news_post_type', $postType);
-        save_setting('news_public_url_template', $template);
-        flash('Configuração do conector de notícias salva.');
-    } catch (Throwable $error) {
-        flash('Não foi possível salvar o conector: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
-    }
-    header('Location: ?route=admin&section=news');
-    exit;
-}
-
-if ($route === 'services-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    check_csrf();
-    try {
-        $sourceUrl = trim((string) ($_POST['services_source_url'] ?? ''));
-        if ($sourceUrl === '' || mb_strlen($sourceUrl, 'UTF-8') > 2048 || preg_match('#^https?://#i', $sourceUrl) !== 1) {
-            throw new InvalidArgumentException('Informe uma URL pública válida iniciada por http:// ou https://.');
-        }
-        save_setting('services_source_url', $sourceUrl);
-        save_setting('services_deactivate_missing', !empty($_POST['services_deactivate_missing']) ? '1' : '0');
-        flash('Configuração da Carta de Serviços salva.');
-    } catch (Throwable $error) {
-        flash('Não foi possível salvar a configuração: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
-    }
-    header('Location: ?route=admin&section=services');
-    exit;
-}
-
-if ($route === 'services-import' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    check_csrf();
-    $file = $_FILES['services_document'] ?? null;
-    try {
-        $maximumBytes = 20 * 1024 * 1024;
-        if (!$file || $file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name']) || (int) $file['size'] > $maximumBytes) {
-            throw new InvalidArgumentException('Envie um arquivo TXT ou MD de até 20 MB.');
-        }
-        $extension = strtolower(pathinfo((string) $file['name'], PATHINFO_EXTENSION));
-        if (!in_array($extension, ['txt', 'md'], true)) {
-            throw new InvalidArgumentException('A Carta de Serviços deve ser enviada em TXT ou MD.');
-        }
-        $text = file_get_contents($file['tmp_name']);
-        if (!is_string($text) || trim($text) === '') {
-            throw new InvalidArgumentException('O arquivo da Carta de Serviços está vazio.');
-        }
-        $sourceUrl = trim(setting('services_source_url', 'https://www.jaraguadosul.sc.gov.br/servicos'));
-        $deactivateMissing = setting('services_deactivate_missing', '0') === '1';
-        $summary = (new ServiceConnector(db(), $sourceUrl))->importText($text, 'upload', $deactivateMissing);
-        audit_event('services_sync', 'admin', ['metadata' => ['trigger' => 'upload', 'status' => $summary['status'], 'source_url' => $summary['source_url'], 'read_count' => $summary['read_count'], 'imported_count' => $summary['imported_count'], 'updated_count' => $summary['updated_count'], 'unchanged_count' => $summary['unchanged_count'], 'withdrawn_count' => $summary['withdrawn_count'], 'error_count' => $summary['error_count']]]);
-        flash('Carta de Serviços importada: ' . $summary['imported_count'] . ' novas, ' . $summary['updated_count'] . ' atualizadas, ' . $summary['unchanged_count'] . ' sem alteração e ' . $summary['withdrawn_count'] . ' retiradas.');
-    } catch (Throwable $error) {
-        audit_event('services_sync', 'admin', ['metadata' => ['trigger' => 'upload', 'status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8')]]);
-        flash('Não foi possível importar a Carta de Serviços: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
-    }
-    header('Location: ?route=admin&section=services');
+    header('Location: ?route=admin&section=sources');
     exit;
 }
 
@@ -1432,7 +1477,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'news', 'services', 'security'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'sources', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1450,22 +1495,23 @@ if ($route === 'admin') {
     $currentLogo = brand_logo_filename();
     $defaultScopeResponse = default_scope_template();
     $currentGuidance = AiGuidance::fromSettings($pdo);
-    $newsConfig = news_config($pdo);
-    $newsConnector = new NewsConnector($pdo, $newsConfig);
-    $newsStatus = $newsConnector->status();
-    $newsLastRun = $newsStatus['last_run'];
-    $newsPasswordSet = setting('news_db_password', '') !== '';
-    $serviceActiveCount = (int) $pdo->query("SELECT COUNT(*) FROM document_services WHERE source_name = 'carta_servicos' AND is_active = 1")->fetchColumn();
-    $serviceLastRun = $pdo->query('SELECT * FROM service_sync_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
-    $serviceSourceUrl = setting('services_source_url', 'https://www.jaraguadosul.sc.gov.br/servicos');
-    $serviceDeactivateMissing = setting('services_deactivate_missing', '0') === '1';
+    $sourceRows = SourceRegistry::all($pdo);
+    $sourceEdit = null;
+    $sourceEditConfig = [];
+    $sourceEditId = (int) ($_GET['edit_source'] ?? 0);
+    if ($sourceEditId > 0) {
+        $sourceEdit = SourceRegistry::find($pdo, $sourceEditId);
+        if ($sourceEdit) {
+            $sourceEditConfig = SourceRegistry::publicConfig($sourceEdit);
+        }
+    }
     $flashMessage = take_flash();
     $menuLink = static function (string $key, string $label, string $count = '') use ($section): string {
         $active = $section === $key ? ' active' : '';
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('services', 'Carta de Serviços') . $menuLink('security', 'Segurança') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('sources', 'Fontes de conhecimento', count($sourceRows) > 0 ? (string) count($sourceRows) : '') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1476,7 +1522,7 @@ if ($route === 'admin') {
         } else {
             $body .= '<div class="success-alert">Nenhuma pergunta aguarda intervenção humana no momento.</div>';
         }
-        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div><div class="card"><h3>Carta de Serviços</h3><p class="muted">Importe serviços públicos em Markdown RAG e cite o link da fonte nas respostas.</p><a href="?route=admin&amp;section=services">Gerenciar Carta de Serviços</a></div></div>';
+        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div><div class="card"><h3>Fontes de conhecimento</h3><p class="muted">Ative plugins configuráveis para importar bancos, arquivos e outros repositórios externos. Nenhum conector é obrigatório.</p><a href="?route=admin&amp;section=sources">Gerenciar fontes</a></div></div>';
     } elseif ($section === 'pending') {
         $body .= '<div class="card"><div class="eyebrow">AÇÃO PRIORITÁRIA</div><h3>Intervenção humana necessária</h3><p class="section-intro muted">Responda cada pergunta abaixo para concluir o atendimento. A resposta aprovada será incorporada à memória validada do RAGLocal.</p>';
         if ($pendingCount > 0) {
@@ -1511,22 +1557,30 @@ if ($route === 'admin') {
             $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
         }
         $body .= '</select></label><label>Limiar mínimo de confiança (0,50 a 0,99)<input name="min_confidence" type="number" min="0.50" max="0.99" step="0.01" value="' . h(number_format($minConfidence, 2, '.', '')) . '"></label><label>Fontes mínimas citadas<input name="min_sources" type="number" min="1" max="3" step="1" value="' . h((string) $minSources) . '"></label><label>Tempo máximo de consulta (segundos)<input name="timeout" type="number" min="20" max="180" step="5" value="' . h((string) $timeout) . '"></label><label>Resposta padrão para perguntas fora do contexto<textarea name="default_scope_response" maxlength="500" rows="4">' . h($defaultScopeResponse) . '</textarea><span class="muted">Use <code>{empresa}</code> para inserir automaticamente o nome configurado da empresa.</span><button>Salvar configurações</button></form><p class="muted">Para hardware limitado, comece com <b>qwen3:4b</b>, já instalado, e limiar 0,75. Modelos de 1B são alternativas mais leves, mas precisam ser instalados no servidor Ollama antes do uso.</p></div>';
-    } elseif ($section === 'news') {
-        $newsLastRunHtml = '<div class="empty-state">Nenhuma sincronização executada ainda.</div>';
-        if (is_array($newsLastRun)) {
-            $newsLastRunHtml = '<p><b>Status:</b> ' . h((string) $newsLastRun['status']) . ' · <b>Início:</b> ' . h(format_datetime_br((string) $newsLastRun['started_at'])) . ' · <b>Leituras:</b> ' . (int) $newsLastRun['read_count'] . '</p><p class="muted">Novas: ' . (int) $newsLastRun['imported_count'] . ' · Atualizadas: ' . (int) $newsLastRun['updated_count'] . ' · Sem alteração: ' . (int) $newsLastRun['unchanged_count'] . ' · Retiradas: ' . (int) $newsLastRun['withdrawn_count'] . ' · Erros: ' . (int) $newsLastRun['error_count'] . ($newsLastRun['error_message'] ? '<br>Erro: ' . h((string) $newsLastRun['error_message']) : '') . '</p>';
+    } elseif ($section === 'sources') {
+        $sourceForForm = $sourceEdit ?: ['id' => 0, 'source_key' => '', 'plugin_key' => 'database_table', 'name' => '', 'description' => ''];
+        $sourceConfigForForm = $sourceEditConfig ?: ['host' => '', 'port' => 3306, 'database' => '', 'user' => '', 'password_enc' => '', 'table' => '', 'key_column' => 'id', 'title_column' => 'title', 'content_columns' => [], 'filter_column' => '', 'filter_value' => '', 'status_column' => '', 'status_value' => '', 'published_column' => '', 'modified_column' => '', 'url_column' => '', 'public_url_template' => '', 'withdraw_missing' => false];
+        $body .= '<div class="card"><div class="eyebrow">ARQUITETURA DE PLUGINS</div><h3>Fontes de conhecimento</h3><p class="muted">Uma fonte conecta um plugin a um repositório externo e produz documentos locais para o RAG. Plugins podem ser ativados, desativados, editados ou removidos por instalação. Notícias, produtos, pesquisas, estoque e outros domínios são apenas exemplos de dados; não são módulos obrigatórios do RAGLocal.</p><p class="muted"><b>Pipeline:</b> o plugin faz a ingestão (Loader), a normalização e fragmentação formam os chunks (Chunker), o MariaDB mantém o índice (Indexer), a busca seleciona evidências (Retriever) e o Ollama gera a resposta fundamentada.</p></div>';
+        $body .= source_form_html($sourceForForm, $sourceConfigForForm, csrf());
+        $body .= '<div class="card"><h3>Fontes configuradas</h3><p class="muted">Desativar uma fonte impede que seus documentos sejam recuperados. Remover uma fonte exclui também os documentos derivados e seus chunks, mas mantém o registro da operação na auditoria.</p>';
+        if (!$sourceRows) {
+            $body .= '<div class="empty-state">Nenhuma fonte externa configurada. O RAGLocal continua funcionando apenas com os documentos enviados diretamente à base.</div>';
+        } else {
+            $body .= '<table><thead><tr><th>Fonte</th><th>Plugin</th><th>Estado</th><th>Itens indexados</th><th>Última sincronização</th><th>Ações</th></tr></thead><tbody>';
+            foreach ($sourceRows as $sourceRow) {
+                $sourceId = (int) $sourceRow['id'];
+                $sourceConfig = SourceRegistry::publicConfig($sourceRow);
+                $lastRun = source_last_run($pdo, $sourceId);
+                $state = (int) $sourceRow['enabled'] === 1 ? '<span class="badge">Ativa</span>' : '<span class="badge" style="background:#f2f4f7;color:#667085">Desativada</span>';
+                $pluginDefinition = SourceRegistry::plugins()[(string) $sourceRow['plugin_key']] ?? null;
+                $pluginLabel = is_array($pluginDefinition) ? (string) ($pluginDefinition['label'] ?? $sourceRow['plugin_key']) : (string) $sourceRow['plugin_key'];
+                $lastRunLabel = is_array($lastRun) ? h(format_datetime_br((string) $lastRun['started_at'])) . '<br><span class="muted">' . h((string) $lastRun['status']) . '</span>' : '<span class="muted">Nunca</span>';
+                $toggleLabel = (int) $sourceRow['enabled'] === 1 ? 'Desativar' : 'Ativar';
+                $body .= '<tr><td><b>' . h((string) $sourceRow['name']) . '</b><br><span class="muted">' . h((string) $sourceRow['source_key']) . '</span><br><span class="muted">' . h((string) ($sourceRow['description'] ?? '')) . '</span></td><td>' . h($pluginLabel) . '</td><td>' . $state . '</td><td>' . source_document_count($pdo, $sourceId) . '</td><td>' . $lastRunLabel . '</td><td><div class="button-row"><a href="?route=admin&amp;section=sources&amp;edit_source=' . $sourceId . '">Editar</a><form action="?route=source-sync" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="source_id" value="' . $sourceId . '"><button type="submit">Sincronizar</button></form><form action="?route=source-toggle" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="source_id" value="' . $sourceId . '"><button type="submit" class="button-secondary">' . $toggleLabel . '</button></form><form action="?route=source-remove" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="source_id" value="' . $sourceId . '"><input name="confirm_remove" placeholder="Digite REMOVE" size="12" required><button type="submit" class="button-secondary">Remover</button></form></div></td></tr>';
+            }
+            $body .= '</tbody></table>';
         }
-        $newsEnabledChecked = (string) $newsConfig['enabled'] === '1' ? ' checked' : '';
-        $newsPasswordInfo = $newsPasswordSet ? 'Uma senha está armazenada de forma protegida.' : 'Nenhuma senha foi configurada.';
-        $newsTemplate = (string) $newsConfig['public_url_template'];
-        $body .= '<div class="card"><div class="eyebrow">CONECTOR</div><h3>Notícias do WordPress</h3><p class="muted">Importa somente registros publicados de <code>wp_posts</code> com <code>post_type = pmjs_noticia</code>. O banco editorial é usado apenas para leitura; as perguntas consultam o índice local.</p><form action="?route=news-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label><input type="checkbox" name="news_enabled" value="1"' . $newsEnabledChecked . '> Ativar conector</label><label>Servidor ou IP do banco editorial<input name="news_db_host" maxlength="255" value="' . h((string) $newsConfig['host']) . '" required></label><label>Porta<input name="news_db_port" type="number" min="1" max="65535" value="' . h((string) $newsConfig['port']) . '" required></label><label>Nome do banco<input name="news_db_name" maxlength="190" value="' . h((string) $newsConfig['database']) . '" required></label><label>Usuário somente leitura<input name="news_db_user" maxlength="190" value="' . h((string) $newsConfig['user']) . '" required></label><label>Senha do banco editorial<input name="news_db_password" type="password" autocomplete="new-password" placeholder="Deixe em branco para manter a atual"></label><span class="muted">' . h($newsPasswordInfo) . '</span><label>Tabela<input name="news_db_table" maxlength="120" value="' . h((string) $newsConfig['table']) . '" required></label><label>Tipo de publicação<input name="news_post_type" maxlength="40" value="' . h((string) $newsConfig['post_type']) . '" required></label><label>Modelo do link público<input name="news_public_url_template" maxlength="2048" value="' . h($newsTemplate) . '" placeholder="https://site.exemplo/noticias/{slug}"></label><span class="muted">Use <code>{id}</code>, <code>{slug}</code> ou <code>{guid}</code>. Se ficar vazio, o conector usará o campo <code>guid</code> quando ele for uma URL válida.</span><br><button>Salvar configuração</button></form></div><div class="card"><h3>Sincronização</h3><p class="muted">Há <b>' . (int) $newsStatus['active'] . '</b> notícias ativas no índice local. A sincronização é incremental: itens sem alteração não são reprocessados. Notícias despublicadas deixam de ser consideradas pelo RAG.</p><div class="reference">' . $newsLastRunHtml . '</div><form action="?route=news-sync" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><button type="submit">Sincronizar agora</button></form></div>';
-    } elseif ($section === 'services') {
-        $serviceRunHtml = '<div class="empty-state">Nenhuma importação executada ainda.</div>';
-        if (is_array($serviceLastRun)) {
-            $serviceRunHtml = '<p><b>Status:</b> ' . h((string) $serviceLastRun['status']) . ' · <b>Início:</b> ' . h(format_datetime_br((string) $serviceLastRun['started_at'])) . ' · <b>Blocos lidos:</b> ' . (int) $serviceLastRun['read_count'] . '</p><p class="muted">Novos: ' . (int) $serviceLastRun['imported_count'] . ' · Atualizados: ' . (int) $serviceLastRun['updated_count'] . ' · Sem alteração: ' . (int) $serviceLastRun['unchanged_count'] . ' · Retirados: ' . (int) $serviceLastRun['withdrawn_count'] . ' · Erros: ' . (int) $serviceLastRun['error_count'] . ($serviceLastRun['error_message'] ? '<br>Erro: ' . h((string) $serviceLastRun['error_message']) : '') . '</p>';
-        }
-        $deactivateChecked = $serviceDeactivateMissing ? ' checked' : '';
-        $body .= '<div class="card"><div class="eyebrow">FONTE DOCUMENTAL</div><h3>Carta de Serviços</h3><p class="muted">Importe a conversão TXT ou MD da Carta de Serviços. Cada bloco iniciado por <code># SERVIÇO:</code> e separado por <code>---</code> será transformado em um documento Markdown canônico e indexado separadamente.</p><form action="?route=services-import" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Arquivo TXT ou MD da Carta de Serviços<input type="file" name="services_document" accept=".txt,.md" required></label><button>Importar e indexar serviços</button></form><p class="muted">O arquivo original não é mantido como fonte do RAG; apenas os artefatos Markdown estruturados permanecem no armazenamento privado.</p></div><div class="card"><h3>Configuração da fonte</h3><form action="?route=services-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>URL pública da Carta de Serviços<input name="services_source_url" type="url" maxlength="2048" value="' . h($serviceSourceUrl) . '" required></label><label><input type="checkbox" name="services_deactivate_missing" value="1"' . $deactivateChecked . '> Desativar serviços que não aparecerem na próxima importação</label><p class="muted">Mantenha desmarcado quando o arquivo for parcial. Ative somente se cada importação representar a Carta completa.</p><button>Salvar configuração</button></form></div><div class="card"><h3>Estado da base</h3><p><b>' . $serviceActiveCount . '</b> serviços ativos no índice local.</p><div class="reference">' . $serviceRunHtml . '</div></div>';
+        $body .= '</div>';
     } elseif ($section === 'security') {
         $body .= '<div class="card"><div class="eyebrow">SEGURANÇA DA CONTA</div><h3>Alterar senha administrativa</h3><p class="muted">Troque sua senha a qualquer momento. A senha atual é exigida e a nova senha deve ter entre 12 e 255 caracteres.</p><form action="?route=password" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Senha atual<input name="current_password" type="password" autocomplete="current-password" required></label><label>Nova senha<input name="new_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><label>Confirme a nova senha<input name="confirm_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><button>Alterar senha</button></form></div>';
     }
@@ -1582,7 +1636,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($citations as $citation) {
         $citationTitle = h((string) $citation['title']);
         $citationUrl = trim((string) ($citation['public_url'] ?? ''));
-        $citationLink = preg_match('#^https?://#i', $citationUrl) === 1 ? ' <a href="' . h($citationUrl) . '" target="_blank" rel="noopener noreferrer">Abrir notícia</a>' : '';
+        $citationLink = preg_match('#^https?://#i', $citationUrl) === 1 ? ' <a href="' . h($citationUrl) . '" target="_blank" rel="noopener noreferrer">Abrir fonte</a>' : '';
         $body .= '<div class="response-source"><b>Fonte:</b> ' . $citationTitle . $citationLink . '</div>';
     }
     $body .= '<div class="response-meta">Tempo para localizar e processar a resposta: ' . h(format_response_time($responseTimeMs)) . '</div>';

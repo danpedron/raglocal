@@ -33,16 +33,16 @@ INSERT INTO settings(name, value) VALUES
   ('ai_public_intro', 'Consulte o regimento interno e as atas do condomínio. A IA responde somente quando encontra evidência suficiente na base; caso contrário, encaminha a pergunta para atendimento humano.'),
   ('ai_soul', 'Você é o assistente oficial de {empresa}. Atenda em português brasileiro de forma clara, respeitosa, objetiva e acolhedora. Priorize informar com precisão, explicar limites de forma transparente e orientar o usuário ao atendimento humano quando a base não sustentar uma resposta. Preserve neutralidade institucional, não emita julgamentos pessoais e não invente fatos, interpretações, prazos, regras ou decisões.'),
   ('ai_interpretation_rules', ''),
-  ('services_source_url', 'https://www.jaraguadosul.sc.gov.br/servicos'),
+  ('services_source_url', ''),
   ('services_deactivate_missing', '0')
 ON DUPLICATE KEY UPDATE name = VALUES(name);
 
 CREATE TABLE documents (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   title VARCHAR(255) NOT NULL,
-  kind ENUM('regimento','ata','memoria','manutencao','noticia','diretriz','servico') NOT NULL,
+  kind ENUM('regimento','ata','memoria','manutencao','noticia','diretriz','servico','externa') NOT NULL,
   source_filename VARCHAR(255) NULL,
-  status ENUM('processing','ready','error') NOT NULL DEFAULT 'processing',
+  status ENUM('processing','ready','error','disabled') NOT NULL DEFAULT 'processing',
   parser_version VARCHAR(40) NULL,
   canonical_sha256 CHAR(64) NULL,
   processed_at TIMESTAMP NULL,
@@ -81,6 +81,65 @@ CREATE TABLE document_artifacts (
   FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
   UNIQUE KEY uq_document_artifact_type (document_id, artifact_type),
   KEY idx_artifacts_sha256 (sha256)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE knowledge_sources (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  source_key VARCHAR(120) NOT NULL UNIQUE,
+  plugin_key VARCHAR(80) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  description TEXT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  config_json LONGTEXT NOT NULL,
+  last_sync_at TIMESTAMP NULL,
+  created_by BIGINT UNSIGNED NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+  KEY idx_knowledge_sources_plugin (plugin_key),
+  KEY idx_knowledge_sources_enabled (enabled)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE document_source_links (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  source_id BIGINT UNSIGNED NOT NULL,
+  document_id BIGINT UNSIGNED NOT NULL,
+  source_item_key VARCHAR(255) NOT NULL,
+  public_url VARCHAR(2048) NULL,
+  source_title VARCHAR(255) NULL,
+  source_content_sha256 CHAR(64) NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  last_sync_at TIMESTAMP NULL,
+  withdrawn_at TIMESTAMP NULL,
+  withdrawal_reason VARCHAR(120) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (source_id) REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+  FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+  UNIQUE KEY uq_document_source_item (source_id, source_item_key),
+  UNIQUE KEY uq_document_source_document (source_id, document_id),
+  KEY idx_document_source_active (source_id, is_active),
+  KEY idx_document_source_url (public_url(255))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE source_sync_runs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  source_id BIGINT UNSIGNED NOT NULL,
+  trigger_type ENUM('manual','cron') NOT NULL,
+  status ENUM('running','completed','completed_with_errors','error') NOT NULL,
+  read_count INT UNSIGNED NOT NULL DEFAULT 0,
+  imported_count INT UNSIGNED NOT NULL DEFAULT 0,
+  updated_count INT UNSIGNED NOT NULL DEFAULT 0,
+  unchanged_count INT UNSIGNED NOT NULL DEFAULT 0,
+  withdrawn_count INT UNSIGNED NOT NULL DEFAULT 0,
+  error_count INT UNSIGNED NOT NULL DEFAULT 0,
+  error_message TEXT NULL,
+  started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TIMESTAMP NULL,
+  duration_ms INT UNSIGNED NULL,
+  FOREIGN KEY (source_id) REFERENCES knowledge_sources(id) ON DELETE CASCADE,
+  KEY idx_source_sync_runs_source_started (source_id, started_at),
+  KEY idx_source_sync_runs_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE document_news (
@@ -225,7 +284,7 @@ CREATE TABLE ai_reassessments (
 
 CREATE TABLE audit_logs (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','question_ignored','password_changed','news_sync','guidance_updated','services_sync','question_reassessed') NOT NULL,
+  event_type ENUM('question','ai_answer','human_answer','login_success','login_failure','document_upload','document_enabled','document_disabled','document_removed','question_ignored','password_changed','news_sync','guidance_updated','services_sync','question_reassessed','source_created','source_updated','source_enabled','source_disabled','source_removed','source_sync') NOT NULL,
   actor ENUM('resident','ai','human','admin','system') NOT NULL,
   conversation_id BIGINT UNSIGNED NULL,
   message_id BIGINT UNSIGNED NULL,

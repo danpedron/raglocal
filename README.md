@@ -36,15 +36,16 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_009_markdown_only.sql` | Remoção de artefatos originais e retenção exclusiva do Markdown |
 | `database/migration_010_ignore_question.sql` | Perguntas ignoradas e resposta padrão fora do contexto |
 | `database/migration_011_secure_admin_password.sql` | Troca obrigatória da senha temporária e auditoria de alteração |
-| `database/migration_012_news_connector.sql` | Tipo Notícias, metadados WordPress e histórico de sincronização |
+| `database/migration_012_news_connector.sql` | Compatibilidade histórica do conector WordPress |
 | `database/migration_013_ai_guidance.sql` | Diretrizes da IA, orientação pública, identidade e regras interpretativas |
-| `database/migration_014_services_reassessment.sql` | Carta de Serviços, reavaliação auditável e histórico de importações |
-| `src/NewsConnector.php` | Conector somente leitura, importação incremental e Markdown de notícias |
+| `database/migration_014_services_reassessment.sql` | Compatibilidade histórica da Carta de Serviços e reavaliação auditável |
+| `database/migration_015_generic_sources.sql` | Registro de fontes/plugins, vínculos de documentos e histórico de sincronização |
+| `database/migration_016_generic_sources_cleanup.sql` | Limpeza idempotente de fontes legadas vazias |
+| `src/SourceRegistry.php` | Catálogo de plugins, fontes ativáveis, estado e remoção segura |
+| `src/DatabaseTablePlugin.php` | Plugin genérico de banco/tabela com Loader, Chunker e atualização incremental |
 | `src/AiGuidance.php` | Validação, Markdown canônico e contexto controlado das diretrizes administrativas |
-| `src/ServiceConnector.php` | Parser idempotente, Markdown RAG e índice da Carta de Serviços |
-| `src/NewsSecrets.php` | Proteção AES-GCM da senha do banco editorial usando `APP_SECRET` |
-| `bin/sync_news.php` | Comando para sincronização manual ou diária via cron |
-| `bin/sync_services.php` | Importação agendada de um export TXT/MD confiável da Carta de Serviços |
+| `src/SecretBox.php` | Proteção AES-GCM de credenciais de fontes usando `APP_SECRET` |
+| `bin/sync_sources.php` | Sincronização diária de todas as fontes ativadas |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |
@@ -61,45 +62,33 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql`, `database/migration_013_ai_guidance.sql` e `database/migration_014_services_reassessment.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql`, `database/migration_013_ai_guidance.sql`, `database/migration_014_services_reassessment.sql`, `database/migration_015_generic_sources.sql` e `database/migration_016_generic_sources_cleanup.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
 Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
-## Conector de notícias WordPress
+## Plugins e fontes externas
 
-O painel administrativo possui a seção **Notícias**, onde o administrador configura o servidor, a porta, o banco, o usuário somente leitura, a tabela, o `post_type` e o modelo do link público. Para a estrutura WordPress fornecida, os valores iniciais são `wp_posts` e `pmjs_noticia`. A senha do banco editorial é armazenada de forma protegida com `APP_SECRET`; ela nunca deve ser colocada no repositório ou em mensagens de commit.
+O painel administrativo possui uma única seção **Fontes de conhecimento**. Ela não presume Notícias, Produtos, Pesquisas, Estoque ou qualquer outro domínio. Cada fonte é uma instância independente de um plugin instalado e pode ser criada, editada, sincronizada, ativada, desativada ou removida pelo administrador. Se nenhuma fonte externa for configurada, o RAGLocal continua funcionando somente com os documentos enviados diretamente pela base de conhecimento.
 
-O conector consulta apenas registros com `post_type = 'pmjs_noticia'`, `post_status = 'publish'` e data de publicação válida. Cada registro é identificado pelo `ID` original e pelo hash do conteúdo normalizado. Notícias sem alteração não são reprocessadas; notícias editadas atualizam o Markdown e os chunks existentes; notícias que deixam de estar publicadas são retiradas do índice ativo. O processo é independente, pode ser iniciado pelo botão **Sincronizar agora** e não consulta o banco editorial durante as perguntas dos usuários.
+O plugin inicial **Banco de dados — tabela** é genérico: conecta-se a uma tabela MariaDB/MySQL somente leitura, permite mapear chave, título, colunas de conteúdo, filtros, status, datas e URL pública e transforma cada registro em um documento Markdown RAG. A mesma implementação pode representar posts, notícias, pesquisas, produtos, itens de estoque, contratos ou outro conjunto estruturado, sem criar uma aba específica no núcleo. O nome, a descrição e a chave interna são definidos por instalação.
 
-O modelo de URL pode usar `https://site.exemplo/noticias/{slug}`, `https://site.exemplo/noticia/{id}` ou `{guid}`. Se ficar vazio, o conector usa o campo `guid` quando ele for uma URL HTTP ou HTTPS. O link público é guardado nos metadados do documento e aparece na resposta como fonte clicável.
+Cada fonte externa pode ser configurada com uma conta de leitura restrita, sem permissões de escrita. A senha é protegida com `APP_SECRET` e nunca aparece no painel, no repositório, na auditoria ou nos logs. Os identificadores de tabela e coluna são validados antes de serem usados em SQL; valores de filtro são enviados como parâmetros. O modelo de URL pública pode usar `{id}` e qualquer coluna mapeada, mas o link só é preservado quando resulta em uma URL HTTP ou HTTPS válida.
 
-Para executar diariamente, configure no servidor uma entrada semelhante à seguinte, ajustando o caminho da instalação e o usuário do PHP:
+A sincronização é incremental e idempotente. Itens sem alteração não são reprocessados; itens alterados atualizam o mesmo documento e seus chunks; itens ausentes podem ser retirados quando a opção correspondente estiver ativada. Desativar uma fonte remove seus documentos da recuperação sem apagar imediatamente os artefatos. Reativá-la restaura apenas os itens retirados pela desativação; itens que realmente não estão mais na origem continuam desativados até reaparecerem. Remover uma fonte exige a confirmação textual `REMOVE`, apaga seus vínculos e exclui apenas documentos que não sejam compartilhados com outra fonte. Toda operação é auditada.
 
-```cron
-15 3 * * * www-data /usr/bin/php /var/www/raglocal/bin/sync_news.php >> /var/log/raglocal-news-sync.log 2>&1
-```
+O cron genérico percorre somente fontes ativadas e descobre o executor a partir do registro de plugins. Uma falha em uma fonte não impede o processamento das demais. O bloqueio global e o histórico em `source_sync_runs` evitam execuções concorrentes e permitem observar leituras, inclusões, atualizações, itens inalterados, retiradas, erros e duração.
 
-O usuário do cron precisa ter acesso ao `config/.env`, ao banco local e ao diretório privado `RAG_UPLOAD_DIR`. A conta do banco editorial deve possuir somente `SELECT` na tabela de notícias. O comando registra cada execução em `news_sync_runs` e também na auditoria com o evento `news_sync`.
-
-## Carta de Serviços
-
-A seção **Carta de Serviços** aceita a conversão TXT ou MD com blocos separados por `---` e títulos no formato `# SERVIÇO: Nome`. O parser preserva campos como órgão, descrição, requisitos, prazo, etapas, observações e link, normaliza entidades HTML e gera um Markdown RAG privado por serviço. A fonte é identificada como `Carta de Serviços`, separada de notícias, atas, regimento interno e memórias validadas.
-
-O importador é idempotente: usa uma chave estável derivada do título e um hash do conteúdo. Na segunda importação, itens inalterados não são reprocessados; itens alterados substituem seus chunks e artefatos; e itens ausentes só são desativados quando a opção **Desativar serviços ausentes** estiver ativa. Essa opção deve permanecer desligada para arquivos parciais.
-
-A URL pública de cada serviço é preservada quando o campo `Link` está presente. Quando não há link individual, o RAG utiliza a URL da Carta de Serviços como fonte pública. Para execução agendada, `bin/sync_services.php` recebe um arquivo TXT/MD confiável como primeiro argumento ou pela variável `SERVICES_SOURCE_FILE`; o arquivo deve ser atualizado por um processo autorizado antes do cron. O sistema não presume que o HTML público seja uma exportação completa e estruturada.
-
-Exemplo de cron:
+Exemplo de configuração diária:
 
 ```cron
-30 3 * * * www-data /usr/bin/php /var/www/raglocal/bin/sync_services.php /var/lib/raglocal/carta-servicos/contexto-ia.txt >> /var/log/raglocal-services-sync.log 2>&1
+15 3 * * * www-data /usr/bin/php /var/www/raglocal/bin/sync_sources.php >> /var/log/raglocal-source-sync.log 2>&1
 ```
 
-O conector registra o histórico em `service_sync_runs` e a auditoria usa o evento `services_sync`.
+Para adicionar outro tipo de integração no futuro, instale um plugin que implemente o contrato de fonte, registre seu manifesto no catálogo e disponibilize sua configuração e executor. O núcleo continua consumindo documentos e chunks pelo mesmo pipeline, independentemente do domínio da origem.
 
 ## Reavaliação após atualização da base
 
-Na fila de **Intervenção humana**, o administrador pode clicar em **Reavaliar com a base atualizada** depois de importar um novo documento ou a Carta de Serviços. A pergunta é pesquisada novamente no índice atual e uma nova resposta é gravada como mensagem separada, preservando a resposta anterior, o rascunho anterior, as fontes, o modelo, a confiança e o tempo da nova tentativa. A operação é registrada em `ai_reassessments` e na auditoria com o evento `question_reassessed`.
+Na fila de **Intervenção humana**, o administrador pode clicar em **Reavaliar com a base atualizada** depois de importar um novo documento ou sincronizar uma fonte externa. A pergunta é pesquisada novamente no índice atual e uma nova resposta é gravada como mensagem separada, preservando a resposta anterior, o rascunho anterior, as fontes, o modelo, a confiança e o tempo da nova tentativa. A operação é registrada em `ai_reassessments` e na auditoria com o evento `question_reassessed`.
 
 A reavaliação só pode ser executada enquanto a conversa estiver `human_pending`; ela não apaga a pergunta nem a resposta anterior. Se a nova tentativa encontrar evidência suficiente, a conversa sai da fila humana. Caso contrário, permanece pendente com a resposta padrão e o novo rascunho disponíveis para o atendente.
 
