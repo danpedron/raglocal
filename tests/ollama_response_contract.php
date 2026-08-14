@@ -43,6 +43,12 @@ assert_same(true, $stringBoolean['valid'], 'Representações escalares equivalen
 assert_same(true, $stringBoolean['grounded'], 'O booleano textual deve ser normalizado com segurança.');
 assert_same(0.95, $stringBoolean['confidence'], 'A confiança percentual textual deve ser normalizada.');
 
+$wrappedJson = OllamaResponse::parse([
+    'response' => "Aqui está a resposta solicitada:\n```json\n{\"grounded\":false,\"answer_mode\":\"partial\",\"confidence\":0.55,\"answer\":\"A base confirma vacinação geral, mas não confirma a vacina específica.\",\"source_numbers\":[1]}\n```",
+], 1);
+assert_same(true, $wrappedJson['valid'], 'Um objeto JSON válido envolvido por texto curto deve ser recuperado.');
+assert_same('partial', $wrappedJson['answer_mode'], 'A modalidade do JSON envolvido deve ser preservada.');
+
 $debugOutput = OllamaResponse::parse([
     'response' => '{"input":"O que significa FUJAMA?","context":[{"content":"Fundação Jaraguaense de Meio Ambiente - Fujama"}]}',
 ], 1);

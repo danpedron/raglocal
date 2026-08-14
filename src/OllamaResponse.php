@@ -21,7 +21,7 @@ final class OllamaResponse
                     'items' => ['type' => 'integer'],
                 ],
             ],
-            'required' => ['grounded', 'confidence', 'answer', 'source_numbers'],
+            'required' => ['grounded', 'confidence', 'answer', 'answer_mode', 'source_numbers'],
             'additionalProperties' => false,
         ];
     }
@@ -35,6 +35,9 @@ final class OllamaResponse
 
         $text = preg_replace('/^```(?:json)?\s*|\s*```$/u', '', $text ?? '');
         $data = json_decode((string) $text, true);
+        if (!is_array($data)) {
+            $data = self::extractContractObject((string) $text);
+        }
         if (!is_array($data)) {
             return self::invalid('invalid_json');
         }
@@ -62,7 +65,14 @@ final class OllamaResponse
             $confidence /= 100;
         }
         $confidence = max(0.0, min(1.0, $confidence));
-        $answerMode = $data['answer_mode'] ?? ($grounded ? 'direct' : 'insufficient');
+        $answerMode = $data['answer_mode'] ?? null;
+        if ($answerMode === null) {
+            // Compatibility with older Ollama outputs: a non-grounded answer
+            // that cites evidence is treated as partial, never as approved.
+            $hasCitedEvidence = is_array($data['source_numbers']) && count($data['source_numbers']) > 0;
+            $hasAnswer = is_string($data['answer']) && trim($data['answer']) !== '';
+            $answerMode = (!$grounded && $hasAnswer && $hasCitedEvidence) ? 'partial' : ($grounded ? 'direct' : 'insufficient');
+        }
         if (!is_string($answerMode) || !in_array($answerMode, ['direct', 'partial', 'insufficient'], true)) {
             return self::invalid('invalid_contract');
         }
@@ -89,6 +99,67 @@ final class OllamaResponse
             'source_numbers' => $sourceNumbers,
             'error' => '',
         ];
+    }
+
+    /**
+     * Accept a valid contract object surrounded by a short model preamble or
+     * markdown fence, but never repair malformed JSON or accept arbitrary text.
+     * @return array<string, mixed>|null
+     */
+    private static function extractContractObject(string $text): ?array
+    {
+        $candidates = [];
+        $length = strlen($text);
+        $start = null;
+        $depth = 0;
+        $inString = false;
+        $escaped = false;
+
+        for ($index = 0; $index < $length; $index++) {
+            $character = $text[$index];
+            if ($inString) {
+                if ($escaped) {
+                    $escaped = false;
+                } elseif ($character === '\\') {
+                    $escaped = true;
+                } elseif ($character === '"') {
+                    $inString = false;
+                }
+                continue;
+            }
+            if ($character === '"') {
+                $inString = true;
+                continue;
+            }
+            if ($character === '{') {
+                if ($depth === 0) {
+                    $start = $index;
+                }
+                $depth++;
+            } elseif ($character === '}' && $depth > 0) {
+                $depth--;
+                if ($depth === 0 && $start !== null) {
+                    $candidate = json_decode(substr($text, $start, $index - $start + 1), true);
+                    if (is_array($candidate)) {
+                        $candidates[] = $candidate;
+                    }
+                    $start = null;
+                }
+            }
+        }
+
+        $fallback = null;
+        foreach ($candidates as $candidate) {
+            $hasContractKey = isset($candidate['grounded']) || isset($candidate['answer']) || isset($candidate['source_numbers']) || isset($candidate['confidence']);
+            if ($hasContractKey && $fallback === null) {
+                $fallback = $candidate;
+            }
+            if (isset($candidate['grounded'], $candidate['confidence'], $candidate['answer'], $candidate['source_numbers'])) {
+                return $candidate;
+            }
+        }
+
+        return $fallback;
     }
 
     private static function invalid(string $error): array

@@ -577,7 +577,7 @@ function ollama_call(string $question, array $sources): array
     $hasDirectEvidenceOverlap = RagSearchTerms::hasDirectEvidenceOverlap($question, $sources);
     $hasPartialEvidenceOverlap = RagSearchTerms::hasPartialEvidenceOverlap($question, $sources);
     $shouldRetry = $initialError === ''
-        ? (empty($parsed['valid']) || (!$parsed['grounded'] && ($hasDirectEvidenceOverlap || $hasPartialEvidenceOverlap)))
+        ? (empty($parsed['valid']) || (!$parsed['grounded'] && ($parsed['answer_mode'] ?? 'insufficient') !== 'partial' && ($hasDirectEvidenceOverlap || $hasPartialEvidenceOverlap)))
         : in_array($initialError, $retryableErrors, true);
     if ($shouldRetry) {
         $retry = ollama_generate($model, ollama_retry_prompt($question, $sources), 180);
