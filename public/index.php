@@ -24,6 +24,8 @@ function load_env(string $file): void
 }
 
 load_env(dirname(__DIR__) . '/config/.env');
+require_once dirname(__DIR__) . '/src/NewsSecrets.php';
+require_once dirname(__DIR__) . '/src/NewsConnector.php';
 
 date_default_timezone_set((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Sao_Paulo'));
 
@@ -251,6 +253,13 @@ function save_setting(string $key, string $value): void
     $stmt->execute([$key, $value]);
 }
 
+function news_config(PDO $pdo): array
+{
+    $config = NewsConnector::configFromSettings($pdo);
+    $config['password'] = NewsSecrets::decrypt((string) ($config['password'] ?? ''), envv('APP_SECRET'));
+    return $config;
+}
+
 function brand_name(): string
 {
     $value = trim(setting('brand_name', envv('APP_BRAND_NAME', 'RAGLocal')));
@@ -320,6 +329,7 @@ function document_kind_label(string $kind): string
         'ata' => 'Ata',
         'memoria' => 'Memória validada',
         'manutencao' => 'Manutenção',
+        'noticia' => 'Notícias',
         default => $kind,
     };
 }
@@ -373,7 +383,9 @@ function ollama_call(string $question, array $sources): array
     $contextParts = [];
     foreach ($sources as $index => $source) {
         $number = $index + 1;
-        $contextParts[] = '[' . $number . '] Documento: ' . $source['title'] . ' | Tipo: ' . document_kind_label((string) $source['kind']) . "\n" . $source['content'];
+        $publicUrl = trim((string) ($source['public_url'] ?? ''));
+        $urlContext = $publicUrl !== '' ? ' | URL pública: ' . $publicUrl : '';
+        $contextParts[] = '[' . $number . '] Documento: ' . $source['title'] . ' | Tipo: ' . document_kind_label((string) $source['kind']) . $urlContext . "\n" . $source['content'];
     }
     $context = implode("\n\n", $contextParts);
     $model = setting('ollama_chat_model', envv('OLLAMA_CHAT_MODEL', 'qwen3:4b'));
@@ -591,8 +603,9 @@ function context(string $question): array
         return $validatedMemory;
     }
 
-    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
+    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, dn.public_url, dn.published_at, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
         FROM chunks c JOIN documents d ON d.id = c.document_id
+        LEFT JOIN document_news dn ON dn.document_id = d.id AND dn.is_active = 1
         WHERE d.status = 'ready' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
         ORDER BY score DESC, c.id DESC LIMIT 6");
     $stmt->execute([
@@ -963,6 +976,75 @@ if ($route === 'admin' && !admin()) {
     exit;
 }
 
+if ($route === 'news-sync' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    try {
+        $pdo = db();
+        $news = new NewsConnector($pdo, news_config($pdo));
+        $summary = $news->sync('manual');
+        audit_event('news_sync', 'admin', ['metadata' => ['trigger' => 'manual', 'status' => $summary['status'], 'read_count' => $summary['read_count'], 'imported_count' => $summary['imported_count'], 'updated_count' => $summary['updated_count'], 'unchanged_count' => $summary['unchanged_count'], 'withdrawn_count' => $summary['withdrawn_count'], 'error_count' => $summary['error_count']]]);
+        flash('Sincronização concluída: ' . $summary['imported_count'] . ' novas, ' . $summary['updated_count'] . ' atualizadas, ' . $summary['unchanged_count'] . ' sem alteração e ' . $summary['withdrawn_count'] . ' retiradas.');
+    } catch (Throwable $error) {
+        audit_event('news_sync', 'admin', ['metadata' => ['trigger' => 'manual', 'status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8')]]);
+        flash('A sincronização não foi concluída: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=news');
+    exit;
+}
+
+if ($route === 'news-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    try {
+        $pdo = db();
+        $host = trim((string) ($_POST['news_db_host'] ?? ''));
+        $port = (int) ($_POST['news_db_port'] ?? 3306);
+        $database = trim((string) ($_POST['news_db_name'] ?? ''));
+        $user = trim((string) ($_POST['news_db_user'] ?? ''));
+        $table = trim((string) ($_POST['news_db_table'] ?? 'wp_posts'));
+        $postType = trim((string) ($_POST['news_post_type'] ?? 'pmjs_noticia'));
+        $template = trim((string) ($_POST['news_public_url_template'] ?? ''));
+        if ($host === '' || preg_match('/[\\x00-\\x20]/', $host) === 1 || mb_strlen($host, 'UTF-8') > 255) {
+            throw new InvalidArgumentException('Informe um servidor editorial válido.');
+        }
+        if ($port < 1 || $port > 65535) {
+            throw new InvalidArgumentException('A porta deve estar entre 1 e 65535.');
+        }
+        if ($database === '' || $user === '') {
+            throw new InvalidArgumentException('Informe o nome do banco e o usuário de leitura.');
+        }
+        if (preg_match('/^[A-Za-z0-9_]+$/', $table) !== 1) {
+            throw new InvalidArgumentException('O nome da tabela deve conter somente letras, números e sublinhado.');
+        }
+        if (preg_match('/^[A-Za-z0-9_.-]+$/', $postType) !== 1) {
+            throw new InvalidArgumentException('O post_type informado é inválido.');
+        }
+        if ($template !== '' && (mb_strlen($template, 'UTF-8') > 2048 || preg_match('#^https?://#i', $template) !== 1)) {
+            throw new InvalidArgumentException('O modelo de URL deve começar com http:// ou https://. Use {id}, {slug} ou {guid}.');
+        }
+        $storedPassword = setting('news_db_password', '');
+        $newPassword = (string) ($_POST['news_db_password'] ?? '');
+        if (!empty($_POST['news_remove_password'])) {
+            $storedPassword = '';
+        } elseif ($newPassword !== '') {
+            $storedPassword = NewsSecrets::encrypt($newPassword, envv('APP_SECRET'));
+        }
+        save_setting('news_enabled', !empty($_POST['news_enabled']) ? '1' : '0');
+        save_setting('news_db_host', mb_substr($host, 0, 255, 'UTF-8'));
+        save_setting('news_db_port', (string) $port);
+        save_setting('news_db_name', mb_substr($database, 0, 190, 'UTF-8'));
+        save_setting('news_db_user', mb_substr($user, 0, 190, 'UTF-8'));
+        save_setting('news_db_password', $storedPassword);
+        save_setting('news_db_table', $table);
+        save_setting('news_post_type', $postType);
+        save_setting('news_public_url_template', $template);
+        flash('Configuração do conector de notícias salva.');
+    } catch (Throwable $error) {
+        flash('Não foi possível salvar o conector: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=news');
+    exit;
+}
+
 if ($route === 'settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $allowedModels = array_keys(ollama_models());
@@ -1146,7 +1228,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'settings', 'security'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'settings', 'news', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1163,13 +1245,18 @@ if ($route === 'admin') {
     $currentBrandSubtitle = brand_subtitle();
     $currentLogo = brand_logo_filename();
     $defaultScopeResponse = default_scope_template();
+    $newsConfig = news_config($pdo);
+    $newsConnector = new NewsConnector($pdo, $newsConfig);
+    $newsStatus = $newsConnector->status();
+    $newsLastRun = $newsStatus['last_run'];
+    $newsPasswordSet = setting('news_db_password', '') !== '';
     $flashMessage = take_flash();
     $menuLink = static function (string $key, string $label, string $count = '') use ($section): string {
         $active = $section === $key ? ' active' : '';
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('security', 'Segurança') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1212,6 +1299,15 @@ if ($route === 'admin') {
             $body .= '<option value="' . h($model) . '"' . ($model === $selectedModel ? ' selected' : '') . '>' . h($description) . '</option>';
         }
         $body .= '</select></label><label>Limiar mínimo de confiança (0,50 a 0,99)<input name="min_confidence" type="number" min="0.50" max="0.99" step="0.01" value="' . h(number_format($minConfidence, 2, '.', '')) . '"></label><label>Fontes mínimas citadas<input name="min_sources" type="number" min="1" max="3" step="1" value="' . h((string) $minSources) . '"></label><label>Tempo máximo de consulta (segundos)<input name="timeout" type="number" min="20" max="180" step="5" value="' . h((string) $timeout) . '"></label><label>Resposta padrão para perguntas fora do contexto<textarea name="default_scope_response" maxlength="500" rows="4">' . h($defaultScopeResponse) . '</textarea><span class="muted">Use <code>{empresa}</code> para inserir automaticamente o nome configurado da empresa.</span><button>Salvar configurações</button></form><p class="muted">Para hardware limitado, comece com <b>qwen3:4b</b>, já instalado, e limiar 0,75. Modelos de 1B são alternativas mais leves, mas precisam ser instalados no servidor Ollama antes do uso.</p></div>';
+    } elseif ($section === 'news') {
+        $newsLastRunHtml = '<div class="empty-state">Nenhuma sincronização executada ainda.</div>';
+        if (is_array($newsLastRun)) {
+            $newsLastRunHtml = '<p><b>Status:</b> ' . h((string) $newsLastRun['status']) . ' · <b>Início:</b> ' . h(format_datetime_br((string) $newsLastRun['started_at'])) . ' · <b>Leituras:</b> ' . (int) $newsLastRun['read_count'] . '</p><p class="muted">Novas: ' . (int) $newsLastRun['imported_count'] . ' · Atualizadas: ' . (int) $newsLastRun['updated_count'] . ' · Sem alteração: ' . (int) $newsLastRun['unchanged_count'] . ' · Retiradas: ' . (int) $newsLastRun['withdrawn_count'] . ' · Erros: ' . (int) $newsLastRun['error_count'] . ($newsLastRun['error_message'] ? '<br>Erro: ' . h((string) $newsLastRun['error_message']) : '') . '</p>';
+        }
+        $newsEnabledChecked = (string) $newsConfig['enabled'] === '1' ? ' checked' : '';
+        $newsPasswordInfo = $newsPasswordSet ? 'Uma senha está armazenada de forma protegida.' : 'Nenhuma senha foi configurada.';
+        $newsTemplate = (string) $newsConfig['public_url_template'];
+        $body .= '<div class="card"><div class="eyebrow">CONECTOR</div><h3>Notícias do WordPress</h3><p class="muted">Importa somente registros publicados de <code>wp_posts</code> com <code>post_type = pmjs_noticia</code>. O banco editorial é usado apenas para leitura; as perguntas consultam o índice local.</p><form action="?route=news-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label><input type="checkbox" name="news_enabled" value="1"' . $newsEnabledChecked . '> Ativar conector</label><label>Servidor ou IP do banco editorial<input name="news_db_host" maxlength="255" value="' . h((string) $newsConfig['host']) . '" required></label><label>Porta<input name="news_db_port" type="number" min="1" max="65535" value="' . h((string) $newsConfig['port']) . '" required></label><label>Nome do banco<input name="news_db_name" maxlength="190" value="' . h((string) $newsConfig['database']) . '" required></label><label>Usuário somente leitura<input name="news_db_user" maxlength="190" value="' . h((string) $newsConfig['user']) . '" required></label><label>Senha do banco editorial<input name="news_db_password" type="password" autocomplete="new-password" placeholder="Deixe em branco para manter a atual"></label><span class="muted">' . h($newsPasswordInfo) . '</span><label>Tabela<input name="news_db_table" maxlength="120" value="' . h((string) $newsConfig['table']) . '" required></label><label>Tipo de publicação<input name="news_post_type" maxlength="40" value="' . h((string) $newsConfig['post_type']) . '" required></label><label>Modelo do link público<input name="news_public_url_template" maxlength="2048" value="' . h($newsTemplate) . '" placeholder="https://site.exemplo/noticias/{slug}"></label><span class="muted">Use <code>{id}</code>, <code>{slug}</code> ou <code>{guid}</code>. Se ficar vazio, o conector usará o campo <code>guid</code> quando ele for uma URL válida.</span><br><button>Salvar configuração</button></form></div><div class="card"><h3>Sincronização</h3><p class="muted">Há <b>' . (int) $newsStatus['active'] . '</b> notícias ativas no índice local. A sincronização é incremental: itens sem alteração não são reprocessados. Notícias despublicadas deixam de ser consideradas pelo RAG.</p><div class="reference">' . $newsLastRunHtml . '</div><form action="?route=news-sync" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><button type="submit">Sincronizar agora</button></form></div>';
     } elseif ($section === 'security') {
         $body .= '<div class="card"><div class="eyebrow">SEGURANÇA DA CONTA</div><h3>Alterar senha administrativa</h3><p class="muted">Troque sua senha a qualquer momento. A senha atual é exigida e a nova senha deve ter entre 12 e 255 caracteres.</p><form action="?route=password" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Senha atual<input name="current_password" type="password" autocomplete="current-password" required></label><label>Nova senha<input name="new_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><label>Confirme a nova senha<input name="confirm_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><button>Alterar senha</button></form></div>';
     }
@@ -1256,7 +1352,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     foreach ($result['source_numbers'] as $number) {
         $source = $sources[$number - 1] ?? null;
         if ($source) {
-            $citations[] = ['title' => $source['title'], 'kind' => $source['kind']];
+            $citations[] = ['title' => $source['title'], 'kind' => $source['kind'], 'public_url' => (string) ($source['public_url'] ?? ''), 'published_at' => (string) ($source['published_at'] ?? '')];
         }
     }
     $pdo->prepare('INSERT INTO messages(conversation_id, sender, body, citations) VALUES(?, \'ai\', ?, ?)')->execute([$conversationId, $publicAnswer, json_encode($citations, JSON_UNESCAPED_UNICODE)]);
@@ -1265,7 +1361,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     audit_event('ai_answer', 'ai', ['conversation_id' => $conversationId, 'message_id' => $aiMessageId, 'question' => $question, 'answer' => $publicAnswer, 'ai_draft' => $reference !== '' ? $reference : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $citations, 'response_time_ms' => $responseTimeMs, 'metadata' => ['approved' => (bool) $result['approved'], 'status' => $status, 'ollama_error' => $result['error'], 'source_count' => count($sources), 'response_time_ms' => $responseTimeMs]]);
     $body = '<div class="card"><h2>Resposta</h2><div class="answer">' . h($publicAnswer) . '</div>';
     foreach ($citations as $citation) {
-        $body .= '<div class="response-source"><b>Fonte:</b> ' . h((string) $citation['title']) . '</div>';
+        $citationTitle = h((string) $citation['title']);
+        $citationUrl = trim((string) ($citation['public_url'] ?? ''));
+        $citationLink = preg_match('#^https?://#i', $citationUrl) === 1 ? ' <a href="' . h($citationUrl) . '" target="_blank" rel="noopener noreferrer">Abrir notícia</a>' : '';
+        $body .= '<div class="response-source"><b>Fonte:</b> ' . $citationTitle . $citationLink . '</div>';
     }
     $body .= '<div class="response-meta">Tempo para localizar e processar a resposta: ' . h(format_response_time($responseTimeMs)) . '</div>';
     if ($status === 'human_pending') {

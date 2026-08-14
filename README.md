@@ -36,6 +36,10 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_009_markdown_only.sql` | Remoção de artefatos originais e retenção exclusiva do Markdown |
 | `database/migration_010_ignore_question.sql` | Perguntas ignoradas e resposta padrão fora do contexto |
 | `database/migration_011_secure_admin_password.sql` | Troca obrigatória da senha temporária e auditoria de alteração |
+| `database/migration_012_news_connector.sql` | Tipo Notícias, metadados WordPress e histórico de sincronização |
+| `src/NewsConnector.php` | Conector somente leitura, importação incremental e Markdown de notícias |
+| `src/NewsSecrets.php` | Proteção AES-GCM da senha do banco editorial usando `APP_SECRET` |
+| `bin/sync_news.php` | Comando para sincronização manual ou diária via cron |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |
@@ -52,9 +56,25 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_011_secure_admin_password.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
 Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
+
+## Conector de notícias WordPress
+
+O painel administrativo possui a seção **Notícias**, onde o administrador configura o servidor, a porta, o banco, o usuário somente leitura, a tabela, o `post_type` e o modelo do link público. Para a estrutura WordPress fornecida, os valores iniciais são `wp_posts` e `pmjs_noticia`. A senha do banco editorial é armazenada de forma protegida com `APP_SECRET`; ela nunca deve ser colocada no repositório ou em mensagens de commit.
+
+O conector consulta apenas registros com `post_type = 'pmjs_noticia'`, `post_status = 'publish'` e data de publicação válida. Cada registro é identificado pelo `ID` original e pelo hash do conteúdo normalizado. Notícias sem alteração não são reprocessadas; notícias editadas atualizam o Markdown e os chunks existentes; notícias que deixam de estar publicadas são retiradas do índice ativo. O processo é independente, pode ser iniciado pelo botão **Sincronizar agora** e não consulta o banco editorial durante as perguntas dos usuários.
+
+O modelo de URL pode usar `https://site.exemplo/noticias/{slug}`, `https://site.exemplo/noticia/{id}` ou `{guid}`. Se ficar vazio, o conector usa o campo `guid` quando ele for uma URL HTTP ou HTTPS. O link público é guardado nos metadados do documento e aparece na resposta como fonte clicável.
+
+Para executar diariamente, configure no servidor uma entrada semelhante à seguinte, ajustando o caminho da instalação e o usuário do PHP:
+
+```cron
+15 3 * * * www-data /usr/bin/php /var/www/raglocal/bin/sync_news.php >> /var/log/raglocal-news-sync.log 2>&1
+```
+
+O usuário do cron precisa ter acesso ao `config/.env`, ao banco local e ao diretório privado `RAG_UPLOAD_DIR`. A conta do banco editorial deve possuir somente `SELECT` na tabela de notícias. O comando registra cada execução em `news_sync_runs` e também na auditoria com o evento `news_sync`.
 
 ## Fila administrativa e aprendizado controlado
 
