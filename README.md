@@ -38,10 +38,13 @@ Todas as perguntas, respostas públicas, rascunhos da IA e respostas humanas sã
 | `database/migration_011_secure_admin_password.sql` | Troca obrigatória da senha temporária e auditoria de alteração |
 | `database/migration_012_news_connector.sql` | Tipo Notícias, metadados WordPress e histórico de sincronização |
 | `database/migration_013_ai_guidance.sql` | Diretrizes da IA, orientação pública, identidade e regras interpretativas |
+| `database/migration_014_services_reassessment.sql` | Carta de Serviços, reavaliação auditável e histórico de importações |
 | `src/NewsConnector.php` | Conector somente leitura, importação incremental e Markdown de notícias |
 | `src/AiGuidance.php` | Validação, Markdown canônico e contexto controlado das diretrizes administrativas |
+| `src/ServiceConnector.php` | Parser idempotente, Markdown RAG e índice da Carta de Serviços |
 | `src/NewsSecrets.php` | Proteção AES-GCM da senha do banco editorial usando `APP_SECRET` |
 | `bin/sync_news.php` | Comando para sincronização manual ou diária via cron |
+| `bin/sync_services.php` | Importação agendada de um export TXT/MD confiável da Carta de Serviços |
 | `config/.env.example` | Exemplo sanitizado de configuração para novos ambientes |
 | `bin/bootstrap_admin.php` | Criação ou atualização do administrador por argumentos de linha de comando |
 | `bin/backup.sh` | Backup parametrizável do banco e da configuração privada |
@@ -58,7 +61,7 @@ Em um ambiente compartilhado, configure o firewall do servidor Ollama para aceit
 
 Use PHP 8.2 ou superior com PDO MySQL, cURL, MariaDB e os utilitários `pdftotext`, `pdftoppm`, `tesseract` e o idioma `por` para ingestão de PDFs. Os documentos podem ser classificados como regulamento interno, ata, manutenção técnica ou memória validada; a aplicação também pode ser adaptada para outras categorias conforme o negócio.
 
-Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql` e `database/migration_013_ai_guidance.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
+Crie o banco a partir de `database/schema.sql` ou aplique as migrações em ordem, incluindo `database/migration_012_news_connector.sql`, `database/migration_013_ai_guidance.sql` e `database/migration_014_services_reassessment.sql` em instalações existentes. Crie o administrador com `bin/bootstrap_admin.php`. Se a senha não for informada, o script gera uma senha temporária aleatória, exibe-a uma única vez no terminal e marca a conta para troca obrigatória no primeiro acesso. A senha opcional fica no quinto argumento e o nome da pessoa ou equipe administradora no sexto argumento. Configure o NGINX para encaminhar a aplicação ao PHP-FPM e bloqueie a árvore privada de armazenamento por regra explícita.
 
 Após o primeiro login, substitua a senha temporária na tela de Segurança; enquanto isso não ocorrer, o painel administrativo permanece bloqueado. A aplicação armazena somente o hash da senha e não registra a senha em auditoria ou logs. Antes de publicar, valide com `php -l public/index.php` e confirme que o PHP-FPM consegue gravar em `RAG_UPLOAD_DIR`. A primeira execução deve ser testada com um documento pequeno, verificando a criação do Markdown RAG e dos chunks no MariaDB; o arquivo enviado existe somente durante a conversão.
 
@@ -77,6 +80,28 @@ Para executar diariamente, configure no servidor uma entrada semelhante à segui
 ```
 
 O usuário do cron precisa ter acesso ao `config/.env`, ao banco local e ao diretório privado `RAG_UPLOAD_DIR`. A conta do banco editorial deve possuir somente `SELECT` na tabela de notícias. O comando registra cada execução em `news_sync_runs` e também na auditoria com o evento `news_sync`.
+
+## Carta de Serviços
+
+A seção **Carta de Serviços** aceita a conversão TXT ou MD com blocos separados por `---` e títulos no formato `# SERVIÇO: Nome`. O parser preserva campos como órgão, descrição, requisitos, prazo, etapas, observações e link, normaliza entidades HTML e gera um Markdown RAG privado por serviço. A fonte é identificada como `Carta de Serviços`, separada de notícias, atas, regimento interno e memórias validadas.
+
+O importador é idempotente: usa uma chave estável derivada do título e um hash do conteúdo. Na segunda importação, itens inalterados não são reprocessados; itens alterados substituem seus chunks e artefatos; e itens ausentes só são desativados quando a opção **Desativar serviços ausentes** estiver ativa. Essa opção deve permanecer desligada para arquivos parciais.
+
+A URL pública de cada serviço é preservada quando o campo `Link` está presente. Quando não há link individual, o RAG utiliza a URL da Carta de Serviços como fonte pública. Para execução agendada, `bin/sync_services.php` recebe um arquivo TXT/MD confiável como primeiro argumento ou pela variável `SERVICES_SOURCE_FILE`; o arquivo deve ser atualizado por um processo autorizado antes do cron. O sistema não presume que o HTML público seja uma exportação completa e estruturada.
+
+Exemplo de cron:
+
+```cron
+30 3 * * * www-data /usr/bin/php /var/www/raglocal/bin/sync_services.php /var/lib/raglocal/carta-servicos/contexto-ia.txt >> /var/log/raglocal-services-sync.log 2>&1
+```
+
+O conector registra o histórico em `service_sync_runs` e a auditoria usa o evento `services_sync`.
+
+## Reavaliação após atualização da base
+
+Na fila de **Intervenção humana**, o administrador pode clicar em **Reavaliar com a base atualizada** depois de importar um novo documento ou a Carta de Serviços. A pergunta é pesquisada novamente no índice atual e uma nova resposta é gravada como mensagem separada, preservando a resposta anterior, o rascunho anterior, as fontes, o modelo, a confiança e o tempo da nova tentativa. A operação é registrada em `ai_reassessments` e na auditoria com o evento `question_reassessed`.
+
+A reavaliação só pode ser executada enquanto a conversa estiver `human_pending`; ela não apaga a pergunta nem a resposta anterior. Se a nova tentativa encontrar evidência suficiente, a conversa sai da fila humana. Caso contrário, permanece pendente com a resposta padrão e o novo rascunho disponíveis para o atendente.
 
 ## Diretrizes administrativas da IA
 

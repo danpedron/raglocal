@@ -26,6 +26,7 @@ function load_env(string $file): void
 load_env(dirname(__DIR__) . '/config/.env');
 require_once dirname(__DIR__) . '/src/NewsSecrets.php';
 require_once dirname(__DIR__) . '/src/NewsConnector.php';
+require_once dirname(__DIR__) . '/src/ServiceConnector.php';
 require_once dirname(__DIR__) . '/src/AiGuidance.php';
 
 date_default_timezone_set((string) ($_ENV['APP_TIMEZONE'] ?? 'America/Sao_Paulo'));
@@ -345,6 +346,7 @@ function document_kind_label(string $kind): string
         'memoria' => 'Memória validada',
         'manutencao' => 'Manutenção',
         'noticia' => 'Notícias',
+        'servico' => 'Carta de Serviços',
         'diretriz' => 'Diretrizes da IA',
         default => $kind,
     };
@@ -621,9 +623,14 @@ function context(string $question): array
         return $validatedMemory;
     }
 
-    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind, dn.public_url, dn.published_at, MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
+    $stmt = db()->prepare("SELECT c.id, c.content, d.title, d.kind,
+            COALESCE(dn.public_url, ds.public_url, ds.source_page_url) AS public_url,
+            dn.published_at,
+            ds.department AS service_department,
+            MATCH(c.content) AGAINST(:q IN NATURAL LANGUAGE MODE) AS score
         FROM chunks c JOIN documents d ON d.id = c.document_id
         LEFT JOIN document_news dn ON dn.document_id = d.id AND dn.is_active = 1
+        LEFT JOIN document_services ds ON ds.document_id = d.id AND ds.is_active = 1
         WHERE d.status = 'ready' AND d.kind <> 'diretriz' AND (MATCH(c.content) AGAINST(:q2 IN NATURAL LANGUAGE MODE) > 0 OR c.content LIKE :like)
         ORDER BY score DESC, c.id DESC LIMIT 6");
     $stmt->execute([
@@ -632,6 +639,94 @@ function context(string $question): array
         'like' => '%' . mb_substr($question, 0, 100) . '%',
     ]);
     return $stmt->fetchAll();
+}
+
+function citations_from_result(array $result, array $sources): array
+{
+    $citations = [];
+    foreach ((array) ($result['source_numbers'] ?? []) as $number) {
+        $source = $sources[(int) $number - 1] ?? null;
+        if ($source) {
+            $citations[] = [
+                'title' => (string) ($source['title'] ?? ''),
+                'kind' => (string) ($source['kind'] ?? ''),
+                'public_url' => (string) ($source['public_url'] ?? ''),
+                'published_at' => (string) ($source['published_at'] ?? ''),
+            ];
+        }
+    }
+    return $citations;
+}
+
+function citation_link_label(string $kind): string
+{
+    return match ($kind) {
+        'noticia' => 'Abrir notícia',
+        'servico' => 'Abrir serviço',
+        default => 'Abrir fonte',
+    };
+}
+
+function reassess_conversation(PDO $pdo, int $conversationId): array
+{
+    $stmt = $pdo->prepare("SELECT c.id, c.status,
+            q.id AS question_message_id, q.body AS question,
+            a.id AS previous_ai_message_id
+        FROM conversations c
+        JOIN messages q ON q.conversation_id = c.id AND q.sender = 'resident'
+        LEFT JOIN messages a ON a.id = (
+            SELECT MAX(a2.id) FROM messages a2 WHERE a2.conversation_id = c.id AND a2.sender = 'ai'
+        )
+        WHERE c.id = ? AND q.id = (
+            SELECT MAX(q2.id) FROM messages q2 WHERE q2.conversation_id = c.id AND q2.sender = 'resident'
+        )
+        LIMIT 1");
+    $stmt->execute([$conversationId]);
+    $conversation = $stmt->fetch();
+    if (!$conversation || (string) $conversation['status'] !== 'human_pending') {
+        throw new RuntimeException('A pergunta não está mais aguardando intervenção humana.');
+    }
+
+    $startedAt = microtime(true);
+    $sources = context((string) $conversation['question']);
+    $result = ollama_call((string) $conversation['question'], $sources);
+    $responseTimeMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
+    $draft = trim((string) ($result['answer'] ?? ''));
+    $approved = !empty($result['approved']);
+    $publicAnswer = $approved ? $draft : default_scope_response();
+    $status = $approved ? 'answered' : 'human_pending';
+    $citations = citations_from_result($result, $sources);
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare('INSERT INTO messages(conversation_id, sender, body, citations) VALUES(?, \'ai\', ?, ?)')
+            ->execute([$conversationId, $publicAnswer, json_encode($citations, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]);
+        $newAiMessageId = (int) $pdo->lastInsertId();
+        $pdo->prepare('UPDATE conversations SET status = ?, ai_draft = ?, ai_confidence = ?, ai_model = ? WHERE id = ?')
+            ->execute([$status, $draft !== '' ? $draft : null, (float) ($result['confidence'] ?? 0), (string) ($result['model'] ?? ''), $conversationId]);
+        $pdo->prepare('INSERT INTO ai_reassessments(conversation_id, question_message_id, previous_ai_message_id, new_ai_message_id, status, ai_draft, public_answer, ai_confidence, ai_model, citations, source_count, response_time_ms, triggered_by) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$conversationId, (int) $conversation['question_message_id'], $conversation['previous_ai_message_id'] !== null ? (int) $conversation['previous_ai_message_id'] : null, $newAiMessageId, $status, $draft !== '' ? $draft : null, $publicAnswer, (float) ($result['confidence'] ?? 0), (string) ($result['model'] ?? ''), json_encode($citations, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), count($sources), $responseTimeMs, (int) ($_SESSION['user']['id'] ?? 0)]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        $pdo->rollBack();
+        throw $error;
+    }
+
+    return [
+        'conversation_id' => $conversationId,
+        'question' => (string) $conversation['question'],
+        'question_message_id' => (int) $conversation['question_message_id'],
+        'new_ai_message_id' => $newAiMessageId,
+        'status' => $status,
+        'public_answer' => $publicAnswer,
+        'draft' => $draft,
+        'confidence' => (float) ($result['confidence'] ?? 0),
+        'model' => (string) ($result['model'] ?? ''),
+        'citations' => $citations,
+        'source_count' => count($sources),
+        'response_time_ms' => $responseTimeMs,
+        'ollama_error' => (string) ($result['error'] ?? ''),
+    ];
 }
 
 function run_process(string $command): string
@@ -1063,6 +1158,70 @@ if ($route === 'news-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POS
     exit;
 }
 
+if ($route === 'services-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    try {
+        $sourceUrl = trim((string) ($_POST['services_source_url'] ?? ''));
+        if ($sourceUrl === '' || mb_strlen($sourceUrl, 'UTF-8') > 2048 || preg_match('#^https?://#i', $sourceUrl) !== 1) {
+            throw new InvalidArgumentException('Informe uma URL pública válida iniciada por http:// ou https://.');
+        }
+        save_setting('services_source_url', $sourceUrl);
+        save_setting('services_deactivate_missing', !empty($_POST['services_deactivate_missing']) ? '1' : '0');
+        flash('Configuração da Carta de Serviços salva.');
+    } catch (Throwable $error) {
+        flash('Não foi possível salvar a configuração: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=services');
+    exit;
+}
+
+if ($route === 'services-import' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $file = $_FILES['services_document'] ?? null;
+    try {
+        $maximumBytes = 20 * 1024 * 1024;
+        if (!$file || $file['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($file['tmp_name']) || (int) $file['size'] > $maximumBytes) {
+            throw new InvalidArgumentException('Envie um arquivo TXT ou MD de até 20 MB.');
+        }
+        $extension = strtolower(pathinfo((string) $file['name'], PATHINFO_EXTENSION));
+        if (!in_array($extension, ['txt', 'md'], true)) {
+            throw new InvalidArgumentException('A Carta de Serviços deve ser enviada em TXT ou MD.');
+        }
+        $text = file_get_contents($file['tmp_name']);
+        if (!is_string($text) || trim($text) === '') {
+            throw new InvalidArgumentException('O arquivo da Carta de Serviços está vazio.');
+        }
+        $sourceUrl = trim(setting('services_source_url', 'https://www.jaraguadosul.sc.gov.br/servicos'));
+        $deactivateMissing = setting('services_deactivate_missing', '0') === '1';
+        $summary = (new ServiceConnector(db(), $sourceUrl))->importText($text, 'upload', $deactivateMissing);
+        audit_event('services_sync', 'admin', ['metadata' => ['trigger' => 'upload', 'status' => $summary['status'], 'source_url' => $summary['source_url'], 'read_count' => $summary['read_count'], 'imported_count' => $summary['imported_count'], 'updated_count' => $summary['updated_count'], 'unchanged_count' => $summary['unchanged_count'], 'withdrawn_count' => $summary['withdrawn_count'], 'error_count' => $summary['error_count']]]);
+        flash('Carta de Serviços importada: ' . $summary['imported_count'] . ' novas, ' . $summary['updated_count'] . ' atualizadas, ' . $summary['unchanged_count'] . ' sem alteração e ' . $summary['withdrawn_count'] . ' retiradas.');
+    } catch (Throwable $error) {
+        audit_event('services_sync', 'admin', ['metadata' => ['trigger' => 'upload', 'status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8')]]);
+        flash('Não foi possível importar a Carta de Serviços: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=services');
+    exit;
+}
+
+if ($route === 'reassess' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    check_csrf();
+    $conversationId = (int) ($_POST['conversation_id'] ?? 0);
+    try {
+        if ($conversationId < 1) {
+            throw new InvalidArgumentException('Atendimento inválido.');
+        }
+        $result = reassess_conversation(db(), $conversationId);
+        audit_event('question_reassessed', 'admin', ['conversation_id' => $conversationId, 'message_id' => $result['new_ai_message_id'], 'question' => $result['question'], 'answer' => $result['public_answer'], 'ai_draft' => $result['draft'] !== '' ? $result['draft'] : null, 'ai_confidence' => $result['confidence'], 'ai_model' => $result['model'], 'citations' => $result['citations'], 'response_time_ms' => $result['response_time_ms'], 'metadata' => ['status' => $result['status'], 'source_count' => $result['source_count'], 'ollama_error' => $result['ollama_error'], 'reassessed_by' => (int) $_SESSION['user']['id']]]);
+        flash($result['status'] === 'answered' ? 'A IA encontrou uma resposta fundamentada após a atualização da base. A pergunta saiu da fila humana.' : 'A IA foi reavaliada, mas ainda não encontrou evidência suficiente.');
+    } catch (Throwable $error) {
+        audit_event('question_reassessed', 'admin', ['conversation_id' => $conversationId > 0 ? $conversationId : null, 'metadata' => ['status' => 'error', 'error' => mb_substr($error->getMessage(), 0, 500, 'UTF-8'), 'reassessed_by' => (int) $_SESSION['user']['id']]]);
+        flash('Não foi possível reavaliar a pergunta: ' . mb_substr($error->getMessage(), 0, 300, 'UTF-8'));
+    }
+    header('Location: ?route=admin&section=pending');
+    exit;
+}
+
 if ($route === 'guidance-settings' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
     check_csrf();
     $pdo = db();
@@ -1273,7 +1432,7 @@ if ($route === 'answer' && admin() && $_SERVER['REQUEST_METHOD'] === 'POST') {
 if ($route === 'admin') {
     $pdo = db();
     $section = (string) ($_GET['section'] ?? 'overview');
-    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'news', 'security'];
+    $validSections = ['overview', 'pending', 'knowledge', 'branding', 'guidance', 'settings', 'news', 'services', 'security'];
     if (!in_array($section, $validSections, true)) {
         $section = 'overview';
     }
@@ -1296,13 +1455,17 @@ if ($route === 'admin') {
     $newsStatus = $newsConnector->status();
     $newsLastRun = $newsStatus['last_run'];
     $newsPasswordSet = setting('news_db_password', '') !== '';
+    $serviceActiveCount = (int) $pdo->query("SELECT COUNT(*) FROM document_services WHERE source_name = 'carta_servicos' AND is_active = 1")->fetchColumn();
+    $serviceLastRun = $pdo->query('SELECT * FROM service_sync_runs ORDER BY id DESC LIMIT 1')->fetch() ?: null;
+    $serviceSourceUrl = setting('services_source_url', 'https://www.jaraguadosul.sc.gov.br/servicos');
+    $serviceDeactivateMissing = setting('services_deactivate_missing', '0') === '1';
     $flashMessage = take_flash();
     $menuLink = static function (string $key, string $label, string $count = '') use ($section): string {
         $active = $section === $key ? ' active' : '';
         $badge = $count !== '' ? '<span class="nav-count">' . h($count) . '</span>' : '';
         return '<a class="' . $active . '" href="?route=admin&amp;section=' . h($key) . '">' . h($label) . $badge . '</a>';
     };
-    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('security', 'Segurança') . '</nav>';
+    $body = '<div class="admin-shell"><div class="admin-head"><div><div class="eyebrow">PAINEL ADMINISTRATIVO</div><h2>Centro de operação</h2><p class="muted">Gerencie a base RAG, a identidade pública e os atendimentos que precisam de decisão humana.</p></div><div class="admin-actions"><a href="?">Atendimento público</a><a href="?route=logout">Sair</a></div></div><nav class="admin-menu" aria-label="Menu administrativo">' . $menuLink('overview', 'Visão geral') . $menuLink('pending', 'Intervenção humana', $pendingCount > 0 ? (string) $pendingCount : '') . $menuLink('knowledge', 'Base de conhecimento') . $menuLink('branding', 'Identidade da empresa') . $menuLink('guidance', 'Diretrizes da IA') . $menuLink('settings', 'Confiabilidade e Ollama') . $menuLink('news', 'Notícias') . $menuLink('services', 'Carta de Serviços') . $menuLink('security', 'Segurança') . '</nav>';
     if ($flashMessage !== '') {
         $body .= '<div class="success-alert">' . h($flashMessage) . '</div>';
     }
@@ -1313,7 +1476,7 @@ if ($route === 'admin') {
         } else {
             $body .= '<div class="success-alert">Nenhuma pergunta aguarda intervenção humana no momento.</div>';
         }
-        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div></div>';
+        $body .= '<div class="grid"><div class="card"><h3>Base de conhecimento</h3><p class="muted">Envie regimentos, atas, certificados e memórias validadas. Os arquivos são convertidos para Markdown RAG.</p><a href="?route=admin&amp;section=knowledge">Gerenciar documentos</a></div><div class="card"><h3>Identidade da empresa</h3><p class="muted">Personalize nome, descrição e logotipo apresentados aos moradores.</p><a href="?route=admin&amp;section=branding">Editar identidade</a></div><div class="card"><h3>Diretrizes da IA</h3><p class="muted">Defina a mensagem inicial, a identidade do assistente e regras de interpretação de termos.</p><a href="?route=admin&amp;section=guidance">Gerenciar diretrizes</a></div><div class="card"><h3>Confiabilidade e Ollama</h3><p class="muted">Ajuste modelo, limiar de confiança, fontes mínimas e tempo limite.</p><a href="?route=admin&amp;section=settings">Revisar configurações</a></div><div class="card"><h3>Carta de Serviços</h3><p class="muted">Importe serviços públicos em Markdown RAG e cite o link da fonte nas respostas.</p><a href="?route=admin&amp;section=services">Gerenciar Carta de Serviços</a></div></div>';
     } elseif ($section === 'pending') {
         $body .= '<div class="card"><div class="eyebrow">AÇÃO PRIORITÁRIA</div><h3>Intervenção humana necessária</h3><p class="section-intro muted">Responda cada pergunta abaixo para concluir o atendimento. A resposta aprovada será incorporada à memória validada do RAGLocal.</p>';
         if ($pendingCount > 0) {
@@ -1322,7 +1485,7 @@ if ($route === 'admin') {
                 $confidence = $item['ai_confidence'] === null ? 'não calculada' : number_format((float) $item['ai_confidence'] * 100, 0, ',', '.') . '%';
                 $questionTime = format_datetime_br((string) $item['question_created_at']);
                 $waiting = waiting_time((string) $item['question_created_at']);
-                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><div class="button-row"><button>Salvar resposta e ensinar a IA</button><button type="submit" formaction="?route=ignore" formmethod="post" formnovalidate class="button-secondary">Ignorar sem responder</button></div></form>';
+                $body .= '<form action="?route=answer" method="post" class="pending-card"><input type="hidden" name="csrf" value="' . csrf() . '"><input type="hidden" name="conversation_id" value="' . (int) $item['id'] . '"><div class="pending-meta"><b>PENDENTE</b> · Recebida em ' . h($questionTime) . ' · Tempo de espera: ' . h($waiting) . '</div><p><b>Pergunta do morador</b><br>' . h((string) $item['body']) . '</p><div class="reference"><b>Rascunho da IA para referência</b> <span class="badge">' . h($confidence) . ' · ' . h((string) ($item['ai_model'] ?: 'modelo desconhecido')) . '</span><br>' . h((string) ($item['ai_draft'] ?: 'O modelo não produziu uma resposta estruturada.')) . '</div><label>Resposta do atendente<textarea name="answer" placeholder="Escreva a resposta validada para este morador e para a memória do RAG..." required></textarea></label><div class="button-row"><button>Salvar resposta e ensinar a IA</button><button type="submit" formaction="?route=reassess" formmethod="post" formnovalidate class="button-secondary">Reavaliar com a base atualizada</button><button type="submit" formaction="?route=ignore" formmethod="post" formnovalidate class="button-secondary">Ignorar sem responder</button></div></form>';
             }
         } else {
             $body .= '<div class="empty-state">A fila está vazia. Quando uma pergunta não tiver evidência suficiente, ela aparecerá aqui com destaque.</div>';
@@ -1357,6 +1520,13 @@ if ($route === 'admin') {
         $newsPasswordInfo = $newsPasswordSet ? 'Uma senha está armazenada de forma protegida.' : 'Nenhuma senha foi configurada.';
         $newsTemplate = (string) $newsConfig['public_url_template'];
         $body .= '<div class="card"><div class="eyebrow">CONECTOR</div><h3>Notícias do WordPress</h3><p class="muted">Importa somente registros publicados de <code>wp_posts</code> com <code>post_type = pmjs_noticia</code>. O banco editorial é usado apenas para leitura; as perguntas consultam o índice local.</p><form action="?route=news-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label><input type="checkbox" name="news_enabled" value="1"' . $newsEnabledChecked . '> Ativar conector</label><label>Servidor ou IP do banco editorial<input name="news_db_host" maxlength="255" value="' . h((string) $newsConfig['host']) . '" required></label><label>Porta<input name="news_db_port" type="number" min="1" max="65535" value="' . h((string) $newsConfig['port']) . '" required></label><label>Nome do banco<input name="news_db_name" maxlength="190" value="' . h((string) $newsConfig['database']) . '" required></label><label>Usuário somente leitura<input name="news_db_user" maxlength="190" value="' . h((string) $newsConfig['user']) . '" required></label><label>Senha do banco editorial<input name="news_db_password" type="password" autocomplete="new-password" placeholder="Deixe em branco para manter a atual"></label><span class="muted">' . h($newsPasswordInfo) . '</span><label>Tabela<input name="news_db_table" maxlength="120" value="' . h((string) $newsConfig['table']) . '" required></label><label>Tipo de publicação<input name="news_post_type" maxlength="40" value="' . h((string) $newsConfig['post_type']) . '" required></label><label>Modelo do link público<input name="news_public_url_template" maxlength="2048" value="' . h($newsTemplate) . '" placeholder="https://site.exemplo/noticias/{slug}"></label><span class="muted">Use <code>{id}</code>, <code>{slug}</code> ou <code>{guid}</code>. Se ficar vazio, o conector usará o campo <code>guid</code> quando ele for uma URL válida.</span><br><button>Salvar configuração</button></form></div><div class="card"><h3>Sincronização</h3><p class="muted">Há <b>' . (int) $newsStatus['active'] . '</b> notícias ativas no índice local. A sincronização é incremental: itens sem alteração não são reprocessados. Notícias despublicadas deixam de ser consideradas pelo RAG.</p><div class="reference">' . $newsLastRunHtml . '</div><form action="?route=news-sync" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><button type="submit">Sincronizar agora</button></form></div>';
+    } elseif ($section === 'services') {
+        $serviceRunHtml = '<div class="empty-state">Nenhuma importação executada ainda.</div>';
+        if (is_array($serviceLastRun)) {
+            $serviceRunHtml = '<p><b>Status:</b> ' . h((string) $serviceLastRun['status']) . ' · <b>Início:</b> ' . h(format_datetime_br((string) $serviceLastRun['started_at'])) . ' · <b>Blocos lidos:</b> ' . (int) $serviceLastRun['read_count'] . '</p><p class="muted">Novos: ' . (int) $serviceLastRun['imported_count'] . ' · Atualizados: ' . (int) $serviceLastRun['updated_count'] . ' · Sem alteração: ' . (int) $serviceLastRun['unchanged_count'] . ' · Retirados: ' . (int) $serviceLastRun['withdrawn_count'] . ' · Erros: ' . (int) $serviceLastRun['error_count'] . ($serviceLastRun['error_message'] ? '<br>Erro: ' . h((string) $serviceLastRun['error_message']) : '') . '</p>';
+        }
+        $deactivateChecked = $serviceDeactivateMissing ? ' checked' : '';
+        $body .= '<div class="card"><div class="eyebrow">FONTE DOCUMENTAL</div><h3>Carta de Serviços</h3><p class="muted">Importe a conversão TXT ou MD da Carta de Serviços. Cada bloco iniciado por <code># SERVIÇO:</code> e separado por <code>---</code> será transformado em um documento Markdown canônico e indexado separadamente.</p><form action="?route=services-import" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Arquivo TXT ou MD da Carta de Serviços<input type="file" name="services_document" accept=".txt,.md" required></label><button>Importar e indexar serviços</button></form><p class="muted">O arquivo original não é mantido como fonte do RAG; apenas os artefatos Markdown estruturados permanecem no armazenamento privado.</p></div><div class="card"><h3>Configuração da fonte</h3><form action="?route=services-settings" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>URL pública da Carta de Serviços<input name="services_source_url" type="url" maxlength="2048" value="' . h($serviceSourceUrl) . '" required></label><label><input type="checkbox" name="services_deactivate_missing" value="1"' . $deactivateChecked . '> Desativar serviços que não aparecerem na próxima importação</label><p class="muted">Mantenha desmarcado quando o arquivo for parcial. Ative somente se cada importação representar a Carta completa.</p><button>Salvar configuração</button></form></div><div class="card"><h3>Estado da base</h3><p><b>' . $serviceActiveCount . '</b> serviços ativos no índice local.</p><div class="reference">' . $serviceRunHtml . '</div></div>';
     } elseif ($section === 'security') {
         $body .= '<div class="card"><div class="eyebrow">SEGURANÇA DA CONTA</div><h3>Alterar senha administrativa</h3><p class="muted">Troque sua senha a qualquer momento. A senha atual é exigida e a nova senha deve ter entre 12 e 255 caracteres.</p><form action="?route=password" method="post"><input type="hidden" name="csrf" value="' . csrf() . '"><label>Senha atual<input name="current_password" type="password" autocomplete="current-password" required></label><label>Nova senha<input name="new_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><label>Confirme a nova senha<input name="confirm_password" type="password" minlength="12" maxlength="255" autocomplete="new-password" required></label><button>Alterar senha</button></form></div>';
     }
