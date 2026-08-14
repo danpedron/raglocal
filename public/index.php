@@ -545,7 +545,10 @@ function ollama_call(string $question, array $sources): array
     $initialError = (string) $generated['error'];
     $parsed = $initialError === '' ? OllamaResponse::parse($generated['response'], count($sources)) : null;
     $retryableErrors = ['ollama_model_error', 'invalid_ollama_response'];
-    $shouldRetry = $initialError === '' ? empty($parsed['valid']) : in_array($initialError, $retryableErrors, true);
+    $hasDirectEvidenceOverlap = RagSearchTerms::hasDirectEvidenceOverlap($question, $sources);
+    $shouldRetry = $initialError === ''
+        ? (empty($parsed['valid']) || (!$parsed['grounded'] && $hasDirectEvidenceOverlap))
+        : in_array($initialError, $retryableErrors, true);
     if ($shouldRetry) {
         $retry = ollama_generate($model, ollama_retry_prompt($question, $sources), 180);
         if ($retry['error'] === '') {
