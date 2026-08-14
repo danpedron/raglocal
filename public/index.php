@@ -886,6 +886,12 @@ function normalize_document_text(string $text): string
     $text = str_replace(["\r\n", "\r"], "\n", $text);
     $text = str_replace("\f", "\n\n[[PAGE_BREAK]]\n\n", $text);
     $text = preg_replace('/[\\x00-\\x08\\x0B\\x0E-\\x1F\\x7F]/u', ' ', $text) ?? $text;
+
+    // Listas de serviços exportadas em Markdown usam --- imediatamente antes do
+    // próximo título. Sem uma quebra de parágrafo, o processador anterior mantinha
+    // centenas de serviços na mesma seção e prejudicava a recuperação semântica.
+    $text = preg_replace('/\\n[ \\t]*---[ \\t]*\\n(?=[ \\t]*#{1,6}\\s+)/u', "\n\n", $text) ?? $text;
+
     $text = preg_replace('/[ \\t]+/u', ' ', $text) ?? $text;
     $text = preg_replace('/\\n{3,}/u', "\n\n", $text) ?? $text;
     return trim($text);
@@ -1007,7 +1013,7 @@ function build_rag_document(string $title, string $kind, string $sourceFilename,
     $normalized = normalize_document_text($text);
     $sourceSha256 = hash('sha256', $normalized);
     $sections = rag_sections($normalized);
-    $parserVersion = 'rag-v1';
+    $parserVersion = 'rag-v2';
     $markdown = [
         '---',
         'rag_format: ' . $parserVersion,
